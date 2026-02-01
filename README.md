@@ -66,3 +66,5 @@ docker build -t aionqa-ai-service .
 docker run -p 5000:5000 -e OPENAI_API_KEY=your-key aionqa-ai-service
 ```
 
+
+

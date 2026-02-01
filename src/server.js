@@ -14,6 +14,7 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
 const RUNNER_TOKEN = process.env.RUNNER_TOKEN || process.env.SERVICE_TOKEN;
+const AI_SERVICE_TOKEN = process.env.AI_SERVICE_TOKEN || process.env.SERVICE_TOKEN;
 
 // OpenAI client - uses API key from environment
 const openaiClient = new OpenAI({
@@ -28,6 +29,50 @@ if (!process.env.OPENAI_API_KEY) {
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
+
+/**
+ * Token authentication middleware
+ * Checks AI_SERVICE_TOKEN from environment
+ */
+function authenticateToken(req, res, next) {
+  // Skip authentication for health check
+  if (req.path === '/health') {
+    return next();
+  }
+
+  const authHeader = req.headers.authorization;
+  
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Missing or invalid authorization header' });
+  }
+  
+  const token = authHeader.substring(7); // Remove 'Bearer ' prefix
+  
+  if (!token) {
+    return res.status(401).json({ error: 'Token required' });
+  }
+  
+  // Check token matches AI_SERVICE_TOKEN
+  if (!AI_SERVICE_TOKEN) {
+    console.error('[AI-SERVICE] AI_SERVICE_TOKEN not configured');
+    return res.status(500).json({ error: 'Service not properly configured' });
+  }
+  
+  if (token !== AI_SERVICE_TOKEN) {
+    console.warn(`[AI-SERVICE] Invalid token attempt from ${req.ip}`);
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+  
+  next();
+}
+
+// Apply authentication to all routes except health
+app.use((req, res, next) => {
+  if (req.path === '/health') {
+    return next();
+  }
+  authenticateToken(req, res, next);
+});
 
 // OpenAI pricing (as of 2024, in USD per 1M tokens)
 const pricing = {
@@ -120,6 +165,7 @@ app.post('/api/ai/chat', async (req, res) => {
     project_id,
     job_id,
     messages,
+    input, // Responses API format (already in correct format)
     model = 'gpt-5-mini',
     temperature,
     max_tokens,
@@ -140,9 +186,54 @@ app.post('/api/ai/chat', async (req, res) => {
     }
 
     // Prepare OpenAI request
+    // Handle both 'input' (Responses API format) and 'messages' (Chat API format)
+    let inputArray;
+    if (input && Array.isArray(input)) {
+      // Already in Responses API format
+      inputArray = input;
+      console.log(`[AI-SERVICE] Using 'input' format (${inputArray.length} items)`);
+    } else if (messages && Array.isArray(messages)) {
+      // Convert messages (Chat API format) to input (Responses API format)
+      inputArray = messages.map(msg => {
+        // If message already has 'type: message', it's already in Responses format
+        if (msg.type === 'message') {
+          return msg;
+        }
+        // Otherwise, convert from Chat format
+        const content = Array.isArray(msg.content) 
+          ? msg.content.map(c => {
+              if (typeof c === 'string') {
+                return { type: 'input_text', text: c };
+              }
+              if (c.type === 'text' && c.text) {
+                return { type: 'input_text', text: c.text };
+              }
+              if (c.type === 'image_url') {
+                const imageUrl = typeof c.image_url === 'string' ? c.image_url : c.image_url?.url;
+                return {
+                  type: 'input_image',
+                  image_url: imageUrl,
+                  detail: c.detail || 'auto'
+                };
+              }
+              return c;
+            })
+          : [{ type: 'input_text', text: msg.content || '' }];
+        
+        return {
+          role: msg.role || 'user',
+          type: 'message',
+          content: content
+        };
+      });
+      console.log(`[AI-SERVICE] Converted 'messages' to 'input' format (${inputArray.length} items)`);
+    } else {
+      throw new Error('Either "input" or "messages" must be provided');
+    }
+
     const openaiRequest = {
       model,
-      messages: Array.isArray(messages) ? messages : [],
+      input: inputArray,
       ...(temperature !== undefined && { temperature }),
       ...(max_tokens !== undefined && { max_tokens }),
       ...otherParams
