@@ -32,7 +32,7 @@ app.use(express.json({ limit: '50mb' }));
 
 /**
  * Token authentication middleware
- * Checks AI_SERVICE_TOKEN from environment
+ * Accepts AI_SERVICE_TOKEN (for helpers) or RUNNER_TOKEN (for crawlers)
  */
 function authenticateToken(req, res, next) {
   // Skip authentication for health check
@@ -52,13 +52,12 @@ function authenticateToken(req, res, next) {
     return res.status(401).json({ error: 'Token required' });
   }
   
-  // Check token matches AI_SERVICE_TOKEN
-  if (!AI_SERVICE_TOKEN) {
-    console.error('[AI-SERVICE] AI_SERVICE_TOKEN not configured');
-    return res.status(500).json({ error: 'Service not properly configured' });
-  }
+  // Check token matches either AI_SERVICE_TOKEN (for helpers) or RUNNER_TOKEN (for crawlers)
+  const isValidToken = 
+    (AI_SERVICE_TOKEN && token === AI_SERVICE_TOKEN) ||
+    (RUNNER_TOKEN && token === RUNNER_TOKEN);
   
-  if (token !== AI_SERVICE_TOKEN) {
+  if (!isValidToken) {
     console.warn(`[AI-SERVICE] Invalid token attempt from ${req.ip}`);
     return res.status(401).json({ error: 'Invalid token' });
   }
