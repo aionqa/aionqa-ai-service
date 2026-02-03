@@ -32,9 +32,9 @@ app.use(express.json({ limit: '50mb' }));
 
 /**
  * Token authentication middleware
- * Accepts AI_SERVICE_TOKEN (for helpers) or RUNNER_TOKEN (for crawlers)
+ * Accepts AI_SERVICE_TOKEN (for helpers) or validates RUNNER_TOKEN with backend (for crawlers)
  */
-function authenticateToken(req, res, next) {
+async function authenticateToken(req, res, next) {
   // Skip authentication for health check
   if (req.path === '/health') {
     return next();
@@ -52,17 +52,42 @@ function authenticateToken(req, res, next) {
     return res.status(401).json({ error: 'Token required' });
   }
   
-  // Check token matches either AI_SERVICE_TOKEN (for helpers) or RUNNER_TOKEN (for crawlers)
-  const isValidToken = 
-    (AI_SERVICE_TOKEN && token === AI_SERVICE_TOKEN) ||
-    (RUNNER_TOKEN && token === RUNNER_TOKEN);
-  
-  if (!isValidToken) {
-    console.warn(`[AI-SERVICE] Invalid token attempt from ${req.ip}`);
-    return res.status(401).json({ error: 'Invalid token' });
+  // First check: AI_SERVICE_TOKEN (for helpers/direct access)
+  if (AI_SERVICE_TOKEN && token === AI_SERVICE_TOKEN) {
+    return next();
   }
   
-  next();
+  // Second check: RUNNER_TOKEN from environment (backward compatibility)
+  if (RUNNER_TOKEN && token === RUNNER_TOKEN) {
+    return next();
+  }
+  
+  // Third check: Validate token with backend (for job-specific runner tokens from crawlers)
+  // Crawlers get RUNNER_TOKEN from backend jobs, so we validate with backend
+  try {
+    const response = await axios.get(`${BACKEND_URL}/api/runner/validate-token`, {
+      headers: {
+        'Authorization': `Bearer ${token}`
+      },
+      timeout: 5000
+    });
+    
+    if (response.status === 200) {
+      // Token is valid according to backend
+      return next();
+    }
+  } catch (error) {
+    // If backend validation fails, continue to reject
+    if (error.response && error.response.status === 401) {
+      console.warn(`[AI-SERVICE] Token validation failed with backend: ${error.response.status}`);
+    } else {
+      console.warn(`[AI-SERVICE] Backend token validation error: ${error.message}`);
+    }
+  }
+  
+  // All validation methods failed
+  console.warn(`[AI-SERVICE] Invalid token attempt from ${req.ip}`);
+  return res.status(401).json({ error: 'Invalid token' });
 }
 
 // Apply authentication to all routes except health
