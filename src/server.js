@@ -288,58 +288,114 @@ app.post('/api/ai/chat', async (req, res) => {
       throw new Error('Either "input" or "messages" must be provided');
     }
 
-    // Step 4: Make LLM API call based on mode
+    // Step 4: Make LLM API call based on mode (with retry logic)
     let response;
-    if (AI_MODE === 'lm-studio') {
-      // LM Studio uses chat format
-      const messages = convertInputToMessages(inputArray);
-      console.log(`[AI-SERVICE] LM Studio request: ${messages.length} messages, model: ${model}`);
-      
+    let lastError = null;
+    const maxAttempts = 2;
+    
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        response = await llmClient.chat(messages, {
-          model: model || 'local-model',
-          temperature: temperature !== undefined ? temperature : 0.7,
-          max_tokens: max_tokens !== undefined ? max_tokens : 1000,
-          ...otherParams
-        });
-        // Convert to Responses format
-        response = convertChatToResponses(response);
+        if (AI_MODE === 'lm-studio') {
+          // LM Studio uses chat format
+          const messages = convertInputToMessages(inputArray);
+          if (attempt === 1) {
+            console.log(`[AI-SERVICE] LM Studio request: ${messages.length} messages, model: ${model}`);
+          } else {
+            console.log(`[AI-SERVICE] LM Studio retry attempt ${attempt}/${maxAttempts}: ${messages.length} messages, model: ${model}`);
+          }
+          
+          response = await llmClient.chat(messages, {
+            model: model || 'local-model',
+            temperature: temperature !== undefined ? temperature : 0.7,
+            max_tokens: max_tokens !== undefined ? max_tokens : 1000,
+            ...otherParams
+          });
+          // Convert to Responses format
+          response = convertChatToResponses(response);
+        } else {
+          // OpenAI and OpenAI-compatible use Responses API
+          const openaiRequest = {
+            model,
+            input: inputArray,
+            ...(temperature !== undefined && { temperature }),
+            ...(max_tokens !== undefined && { max_tokens }),
+            ...otherParams
+          };
+          
+          if (AI_MODE === 'openai') {
+            if (attempt > 1) {
+              console.log(`[AI-SERVICE] OpenAI retry attempt ${attempt}/${maxAttempts}: model: ${model}`);
+            }
+            response = await llmClient.responses.create(openaiRequest);
+          } else {
+            // OpenAI-compatible: try Responses API first, fallback to Chat API
+            try {
+              if (attempt > 1) {
+                console.log(`[AI-SERVICE] OpenAI-compatible retry attempt ${attempt}/${maxAttempts}: model: ${model}`);
+              }
+              response = await llmClient.responses.create(openaiRequest);
+            } catch (error) {
+              // Fallback to chat API
+              const messages = convertInputToMessages(inputArray);
+              const chatResponse = await llmClient.chat.completions.create({
+                model,
+                messages,
+                temperature,
+                max_tokens,
+                ...otherParams
+              });
+              response = convertChatToResponses(chatResponse);
+            }
+          }
+        }
+        
+        // Success - break out of retry loop
+        if (attempt > 1) {
+          console.log(`[AI-SERVICE] ✅ Retry succeeded on attempt ${attempt}`);
+        }
+        break;
+        
       } catch (error) {
-        console.error(`[AI-SERVICE] LM Studio request failed:`, error.message);
+        lastError = error;
+        
+        // Log the error
+        console.error(`[AI-SERVICE] ❌ LLM API call failed (attempt ${attempt}/${maxAttempts}):`, error.message);
         if (error.response) {
           console.error(`  Status: ${error.response.status}`);
           console.error(`  Response data:`, JSON.stringify(error.response.data));
         }
-        throw error;
-      }
-    } else {
-      // OpenAI and OpenAI-compatible use Responses API
-      const openaiRequest = {
-        model,
-        input: inputArray,
-        ...(temperature !== undefined && { temperature }),
-        ...(max_tokens !== undefined && { max_tokens }),
-        ...otherParams
-      };
-      
-      if (AI_MODE === 'openai') {
-        response = await llmClient.responses.create(openaiRequest);
-      } else {
-        // OpenAI-compatible: try Responses API first, fallback to Chat API
-        try {
-          response = await llmClient.responses.create(openaiRequest);
-        } catch (error) {
-          // Fallback to chat API
-          const messages = convertInputToMessages(inputArray);
-          const chatResponse = await llmClient.chat.completions.create({
-            model,
-            messages,
-            temperature,
-            max_tokens,
-            ...otherParams
-          });
-          response = convertChatToResponses(chatResponse);
+        if (error.stack) {
+          console.error(`  Stack:`, error.stack);
         }
+        
+        // Log to backend
+        if (requestJobId) {
+          await logToBackend(requestJobId, 'error', 
+            `❌ AI request failed (attempt ${attempt}/${maxAttempts}): ${error.message}`,
+            {
+              model,
+              project_id: requestProjectId,
+              mode: AI_MODE,
+              attempt,
+              max_attempts: maxAttempts,
+              error: error.message,
+              error_status: error.response?.status,
+              error_data: error.response?.data,
+              error_stack: error.stack,
+              status: attempt < maxAttempts ? 'retrying' : 'failed'
+            }
+          );
+        }
+        
+        // If this was the last attempt, throw the error
+        if (attempt === maxAttempts) {
+          throw error;
+        }
+        
+        // Wait a bit before retry (exponential backoff: 1s, 2s)
+        const retryDelay = attempt * 1000;
+        console.log(`[AI-SERVICE] ⏳ Waiting ${retryDelay}ms before retry...`);
+        await new Promise(resolve => setTimeout(resolve, retryDelay));
       }
     }
 
