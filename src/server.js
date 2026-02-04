@@ -91,11 +91,11 @@ async function authenticateToken(req, res, next) {
 }
 
 // Apply authentication to all routes except health
-app.use((req, res, next) => {
+app.use(async (req, res, next) => {
   if (req.path === '/health') {
     return next();
   }
-  authenticateToken(req, res, next);
+  await authenticateToken(req, res, next);
 });
 
 // OpenAI pricing (as of 2024, in USD per 1M tokens)
