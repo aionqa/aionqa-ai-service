@@ -80,7 +80,7 @@ function createLMStudioClient(config) {
             'Content-Type': 'application/json',
             ...(apiKey && { 'Authorization': `Bearer ${apiKey}` })
           },
-          timeout: 300000
+          timeout: 900000 // 15 minutes timeout for AI requests
         }
       );
       
