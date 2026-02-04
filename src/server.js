@@ -23,6 +23,12 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
 
+// Version info for image update verification
+const SERVICE_VERSION = process.env.SERVICE_VERSION || process.env.IMAGE_TAG || 'unknown';
+const BUILD_DATE = process.env.BUILD_DATE || new Date().toISOString();
+console.log(`[AI-SERVICE] 🏷️  Service Version: ${SERVICE_VERSION}`);
+console.log(`[AI-SERVICE] 📅 Build Date: ${BUILD_DATE}`);
+
 // LLM Mode configuration
 const AI_MODE = process.env.AI_MODE || 'openai'; // openai, openai-compatible, lm-studio
 const AI_SERVICE_TOKEN = process.env.AI_SERVICE_TOKEN; // Optional: for direct access (helpers)
@@ -304,6 +310,52 @@ app.post('/api/ai/chat', async (req, res) => {
             console.log(`[AI-SERVICE] LM Studio retry attempt ${attempt}/${maxAttempts}: ${messages.length} messages, model: ${model}`);
           }
           
+          // Validate messages format before sending
+          if (!Array.isArray(messages) || messages.length === 0) {
+            throw new Error(`Invalid messages format: expected array, got ${typeof messages}`);
+          }
+          
+          // Validate each message has required fields
+          for (let i = 0; i < messages.length; i++) {
+            const msg = messages[i];
+            if (!msg.role || !msg.content) {
+              console.error(`[AI-SERVICE] Invalid message at index ${i}:`, JSON.stringify(msg));
+              throw new Error(`Message at index ${i} missing required fields (role or content)`);
+            }
+            // Ensure content is a string (LM Studio requires string content)
+            if (typeof msg.content !== 'string') {
+              if (Array.isArray(msg.content)) {
+                // Convert array content to string
+                msg.content = msg.content.map(c => typeof c === 'string' ? c : (c.text || JSON.stringify(c))).join('\n');
+              } else {
+                msg.content = String(msg.content || '');
+              }
+            }
+          }
+          
+          const requestPayload = {
+            messages: messages,
+            model: model || 'local-model',
+            temperature: temperature !== undefined ? temperature : 0.7,
+            max_tokens: max_tokens !== undefined ? max_tokens : 1000,
+            ...otherParams
+          };
+          
+          // Log request payload for debugging 400 errors
+          if (attempt === 1) {
+            console.log(`[AI-SERVICE] LM Studio request payload:`, JSON.stringify({
+              messages_count: requestPayload.messages.length,
+              model: requestPayload.model,
+              temperature: requestPayload.temperature,
+              max_tokens: requestPayload.max_tokens,
+              first_message_preview: requestPayload.messages[0] ? {
+                role: requestPayload.messages[0].role,
+                content_length: requestPayload.messages[0].content?.length || 0,
+                content_preview: requestPayload.messages[0].content?.substring(0, 100) || ''
+              } : null
+            }));
+          }
+          
           response = await llmClient.chat(messages, {
             model: model || 'local-model',
             temperature: temperature !== undefined ? temperature : 0.7,
@@ -358,11 +410,19 @@ app.post('/api/ai/chat', async (req, res) => {
       } catch (error) {
         lastError = error;
         
-        // Log the error
+        // Log the error with detailed information
         console.error(`[AI-SERVICE] ❌ LLM API call failed (attempt ${attempt}/${maxAttempts}):`, error.message);
         if (error.response) {
           console.error(`  Status: ${error.response.status}`);
           console.error(`  Response data:`, JSON.stringify(error.response.data));
+          console.error(`  Response headers:`, JSON.stringify(error.response.headers));
+        }
+        if (error.request) {
+          console.error(`  Request config:`, {
+            url: error.config?.url,
+            method: error.config?.method,
+            data_preview: error.config?.data ? (typeof error.config.data === 'string' ? error.config.data.substring(0, 500) : JSON.stringify(error.config.data).substring(0, 500)) : null
+          });
         }
         if (error.stack) {
           console.error(`  Stack:`, error.stack);
