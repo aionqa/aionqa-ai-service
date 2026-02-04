@@ -91,23 +91,51 @@ function createLMStudioClient(config) {
 
 /**
  * Convert OpenAI Responses API input format to chat messages
+ * Handles both Responses API format (input array) and Chat API format (messages array)
  */
 function convertInputToMessages(input) {
-  if (!Array.isArray(input)) {
+  if (!Array.isArray(input) || input.length === 0) {
     return [{ role: 'user', content: 'Hello' }];
   }
   
+  // Check if already in Chat API format (has 'role' and 'content' as string)
+  if (input[0] && typeof input[0].content === 'string' && input[0].role) {
+    // Already in Chat API format, return as-is
+    return input.map(msg => ({
+      role: msg.role || 'user',
+      content: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)
+    }));
+  }
+  
+  // Convert from Responses API format (input array with type: 'message')
   return input.map(item => {
     if (item.type === 'message') {
       const content = item.content || [];
-      const textParts = content
-        .filter(c => c.type === 'input_text')
-        .map(c => c.text)
-        .join('\n');
-      
+      // Handle content array (Responses API format)
+      if (Array.isArray(content)) {
+        const textParts = content
+          .filter(c => c && (c.type === 'input_text' || c.type === 'text'))
+          .map(c => c.text || c.content || '')
+          .filter(text => text.length > 0)
+          .join('\n');
+        
+        return {
+          role: item.role || 'user',
+          content: textParts || 'Hello'
+        };
+      } else if (typeof content === 'string') {
+        // Content is already a string
+        return {
+          role: item.role || 'user',
+          content: content
+        };
+      }
+    }
+    // Fallback: try to extract content from item
+    if (item.content && typeof item.content === 'string') {
       return {
         role: item.role || 'user',
-        content: textParts || 'Hello'
+        content: item.content
       };
     }
     return { role: 'user', content: 'Hello' };

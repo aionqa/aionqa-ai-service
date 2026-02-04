@@ -293,14 +293,25 @@ app.post('/api/ai/chat', async (req, res) => {
     if (AI_MODE === 'lm-studio') {
       // LM Studio uses chat format
       const messages = convertInputToMessages(inputArray);
-      response = await llmClient.chat(messages, {
-        model,
-        temperature,
-        max_tokens,
-        ...otherParams
-      });
-      // Convert to Responses format
-      response = convertChatToResponses(response);
+      console.log(`[AI-SERVICE] LM Studio request: ${messages.length} messages, model: ${model}`);
+      
+      try {
+        response = await llmClient.chat(messages, {
+          model: model || 'local-model',
+          temperature: temperature !== undefined ? temperature : 0.7,
+          max_tokens: max_tokens !== undefined ? max_tokens : 1000,
+          ...otherParams
+        });
+        // Convert to Responses format
+        response = convertChatToResponses(response);
+      } catch (error) {
+        console.error(`[AI-SERVICE] LM Studio request failed:`, error.message);
+        if (error.response) {
+          console.error(`  Status: ${error.response.status}`);
+          console.error(`  Response data:`, JSON.stringify(error.response.data));
+        }
+        throw error;
+      }
     } else {
       // OpenAI and OpenAI-compatible use Responses API
       const openaiRequest = {
