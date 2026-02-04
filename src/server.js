@@ -1,29 +1,51 @@
 /**
  * AionQA AI Service
  * 
- * Handles OpenAI API requests from crawlers.
- * Stores OpenAI API keys securely and proxies requests to OpenAI.
+ * Multi-mode LLM service supporting:
+ * - OpenAI (direct API)
+ * - OpenAI-compatible APIs
+ * - LM Studio (local server)
+ * 
+ * Features:
+ * - 24-hour token authentication (issued by backend)
+ * - Eligibility checks (license/funds)
+ * - No hardcoded secrets (all from environment)
  */
 
 import express from 'express';
 import cors from 'cors';
-import OpenAI from 'openai';
 import axios from 'axios';
+import { createLLMClient } from './llm-providers.js';
+import { checkEligibility } from './eligibility-checker.js';
+import { validateAIServiceToken } from './token-validator.js';
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
-const RUNNER_TOKEN = process.env.RUNNER_TOKEN || process.env.SERVICE_TOKEN;
-const AI_SERVICE_TOKEN = process.env.AI_SERVICE_TOKEN || process.env.SERVICE_TOKEN;
 
-// OpenAI client - uses API key from environment
-const openaiClient = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
+// LLM Mode configuration
+const AI_MODE = process.env.AI_MODE || 'openai'; // openai, openai-compatible, lm-studio
+const AI_SERVICE_TOKEN = process.env.AI_SERVICE_TOKEN; // Optional: for direct access (helpers)
 
-if (!process.env.OPENAI_API_KEY) {
-  console.error('❌ OPENAI_API_KEY environment variable is required');
-  process.exit(1);
+// LLM Configuration based on mode
+const llmConfig = {
+  mode: AI_MODE,
+  apiKey: process.env.OPENAI_API_KEY || process.env.LM_STUDIO_API_KEY || null, // For openai or LM Studio auth
+  baseURL: process.env.LLM_BASE_URL, // For openai-compatible mode
+  url: process.env.LM_STUDIO_URL || 'http://localhost:1234' // For lm-studio mode
+};
+
+// Initialize LLM client
+let llmClient = null;
+try {
+  llmClient = createLLMClient(AI_MODE, llmConfig);
+  console.log(`✅ LLM client initialized in ${AI_MODE} mode`);
+} catch (error) {
+  console.error(`❌ Failed to initialize LLM client:`, error.message);
+  if (AI_MODE === 'openai' && !llmConfig.apiKey) {
+    console.error('❌ OPENAI_API_KEY is required for OpenAI mode');
+    process.exit(1);
+  }
 }
 
 // Middleware
@@ -32,7 +54,9 @@ app.use(express.json({ limit: '50mb' }));
 
 /**
  * Token authentication middleware
- * Accepts AI_SERVICE_TOKEN (for helpers) or validates RUNNER_TOKEN with backend (for crawlers)
+ * Supports:
+ * 1. AI_SERVICE_TOKEN (for helpers/direct access)
+ * 2. 24-hour tokens issued by backend (for crawlers)
  */
 async function authenticateToken(req, res, next) {
   // Skip authentication for health check
@@ -54,35 +78,15 @@ async function authenticateToken(req, res, next) {
   
   // First check: AI_SERVICE_TOKEN (for helpers/direct access)
   if (AI_SERVICE_TOKEN && token === AI_SERVICE_TOKEN) {
+    req.tokenInfo = { type: 'service_token', project_id: null, job_id: null };
     return next();
   }
   
-  // Second check: RUNNER_TOKEN from environment (backward compatibility)
-  if (RUNNER_TOKEN && token === RUNNER_TOKEN) {
+  // Second check: Validate 24-hour token with backend
+  const tokenInfo = await validateAIServiceToken(token);
+  if (tokenInfo.valid) {
+    req.tokenInfo = tokenInfo;
     return next();
-  }
-  
-  // Third check: Validate token with backend (for job-specific runner tokens from crawlers)
-  // Crawlers get RUNNER_TOKEN from backend jobs, so we validate with backend
-  try {
-    const response = await axios.get(`${BACKEND_URL}/api/runner/validate-token`, {
-      headers: {
-        'Authorization': `Bearer ${token}`
-      },
-      timeout: 5000
-    });
-    
-    if (response.status === 200) {
-      // Token is valid according to backend
-      return next();
-    }
-  } catch (error) {
-    // If backend validation fails, continue to reject
-    if (error.response && error.response.status === 401) {
-      console.warn(`[AI-SERVICE] Token validation failed with backend: ${error.response.status}`);
-    } else {
-      console.warn(`[AI-SERVICE] Backend token validation error: ${error.message}`);
-    }
   }
   
   // All validation methods failed
@@ -108,11 +112,12 @@ const pricing = {
   'gpt-5-nano': { input: 0.150, output: 0.600 },
   'gpt-3.5-turbo': { input: 0.50, output: 1.50 },
   'o1-preview': { input: 15.00, output: 60.00 },
-  'o1-mini': { input: 3.00, output: 12.00 }
+  'o1-mini': { input: 3.00, output: 12.00 },
+  'local-model': { input: 0, output: 0 } // Local models are free
 };
 
 /**
- * Calculate cost of an OpenAI API call
+ * Calculate cost of an AI API call
  */
 function calculateCost(usage, model) {
   if (!usage || !model) {
@@ -123,7 +128,7 @@ function calculateCost(usage, model) {
   if (!modelPricing) {
     // Try prefix match (e.g., gpt-4o-2024-08-06 -> gpt-4o)
     const prefix = model.split('-').slice(0, 2).join('-');
-    modelPricing = pricing[prefix] || pricing['gpt-4o-mini']; // Default to gpt-4o-mini pricing
+    modelPricing = pricing[prefix] || pricing['local-model']; // Default to free for unknown models
   }
   
   const inputTokens = usage.prompt_tokens ?? usage.input_tokens ?? 0;
@@ -160,7 +165,6 @@ async function logToBackend(jobId, level, message, metadata = {}) {
       component: 'AI-SERVICE',
       metadata
     }, {
-      headers: RUNNER_TOKEN ? { 'Authorization': `Bearer ${RUNNER_TOKEN}` } : {},
       timeout: 5000
     });
   } catch (error) {
@@ -175,13 +179,15 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     service: 'aionqa-ai-service',
-    openai_configured: !!process.env.OPENAI_API_KEY
+    mode: AI_MODE,
+    llm_configured: !!llmClient,
+    backend_url: BACKEND_URL
   });
 });
 
 /**
  * Main AI request endpoint
- * Receives requests from crawlers and proxies to OpenAI
+ * Receives requests from crawlers and proxies to LLM
  */
 app.post('/api/ai/chat', async (req, res) => {
   const startTime = Date.now();
@@ -196,21 +202,50 @@ app.post('/api/ai/chat', async (req, res) => {
     ...otherParams
   } = req.body;
 
-  console.log(`[AI-SERVICE] Received AI request - Job: ${job_id}, Model: ${model}`);
+  // Get token info from authentication middleware
+  const tokenInfo = req.tokenInfo || {};
+  const requestProjectId = project_id || tokenInfo.project_id;
+  const requestJobId = job_id || tokenInfo.job_id;
+
+  console.log(`[AI-SERVICE] Received AI request - Job: ${requestJobId}, Model: ${model}, Mode: ${AI_MODE}`);
 
   try {
-    // Log request start
-    if (job_id) {
-      await logToBackend(job_id, 'info', `🤖 AI Request: Model: ${model}`, {
+    // Step 1: Check eligibility (license/funds)
+    if (requestProjectId && requestJobId) {
+      const eligibility = await checkEligibility(requestProjectId, requestJobId, model);
+      if (!eligibility.eligible) {
+        const errorMsg = `Request not eligible: ${eligibility.reason || 'Unknown reason'}`;
+        console.warn(`[AI-SERVICE] ${errorMsg}`);
+        
+        await logToBackend(requestJobId, 'error', `❌ ${errorMsg}`, {
+          model,
+          project_id: requestProjectId,
+          eligibility
+        });
+        
+        return res.status(403).json({
+          error: {
+            message: errorMsg,
+            type: 'eligibility_error',
+            code: 'not_eligible',
+            eligibility
+          }
+        });
+      }
+    }
+
+    // Step 2: Log request start
+    if (requestJobId) {
+      await logToBackend(requestJobId, 'info', `🤖 AI Request: Model: ${model}, Mode: ${AI_MODE}`, {
         model,
-        project_id,
-        job_id,
+        project_id: requestProjectId,
+        job_id: requestJobId,
+        mode: AI_MODE,
         status: 'pending'
       });
     }
 
-    // Prepare OpenAI request
-    // Handle both 'input' (Responses API format) and 'messages' (Chat API format)
+    // Step 3: Prepare request based on mode
     let inputArray;
     if (input && Array.isArray(input)) {
       // Already in Responses API format
@@ -219,11 +254,9 @@ app.post('/api/ai/chat', async (req, res) => {
     } else if (messages && Array.isArray(messages)) {
       // Convert messages (Chat API format) to input (Responses API format)
       inputArray = messages.map(msg => {
-        // If message already has 'type: message', it's already in Responses format
         if (msg.type === 'message') {
           return msg;
         }
-        // Otherwise, convert from Chat format
         const content = Array.isArray(msg.content) 
           ? msg.content.map(c => {
               if (typeof c === 'string') {
@@ -255,31 +288,65 @@ app.post('/api/ai/chat', async (req, res) => {
       throw new Error('Either "input" or "messages" must be provided');
     }
 
-    const openaiRequest = {
-      model,
-      input: inputArray,
-      ...(temperature !== undefined && { temperature }),
-      ...(max_tokens !== undefined && { max_tokens }),
-      ...otherParams
-    };
+    // Step 4: Make LLM API call based on mode
+    let response;
+    if (AI_MODE === 'lm-studio') {
+      // LM Studio uses chat format
+      const messages = convertInputToMessages(inputArray);
+      response = await llmClient.chat(messages, {
+        model,
+        temperature,
+        max_tokens,
+        ...otherParams
+      });
+      // Convert to Responses format
+      response = convertChatToResponses(response);
+    } else {
+      // OpenAI and OpenAI-compatible use Responses API
+      const openaiRequest = {
+        model,
+        input: inputArray,
+        ...(temperature !== undefined && { temperature }),
+        ...(max_tokens !== undefined && { max_tokens }),
+        ...otherParams
+      };
+      
+      if (AI_MODE === 'openai') {
+        response = await llmClient.responses.create(openaiRequest);
+      } else {
+        // OpenAI-compatible: try Responses API first, fallback to Chat API
+        try {
+          response = await llmClient.responses.create(openaiRequest);
+        } catch (error) {
+          // Fallback to chat API
+          const messages = convertInputToMessages(inputArray);
+          const chatResponse = await llmClient.chat.completions.create({
+            model,
+            messages,
+            temperature,
+            max_tokens,
+            ...otherParams
+          });
+          response = convertChatToResponses(chatResponse);
+        }
+      }
+    }
 
-    // Make OpenAI API call
-    const response = await openaiClient.responses.create(openaiRequest);
-
-    // Calculate cost
+    // Step 5: Calculate cost
     const costDetails = calculateCost(response.usage, response.model);
     const duration = Date.now() - startTime;
 
-    // Log completion
-    if (job_id) {
+    // Step 6: Log completion
+    if (requestJobId) {
       const inputTokens = response.usage?.prompt_tokens ?? response.usage?.input_tokens ?? 0;
       const outputTokens = response.usage?.completion_tokens ?? response.usage?.output_tokens ?? 0;
       const totalTokens = response.usage?.total_tokens ?? (inputTokens + outputTokens);
 
-      await logToBackend(job_id, 'info', 
+      await logToBackend(requestJobId, 'info', 
         `✅ AI call completed in ${(duration / 1000).toFixed(2)}s - Input: ${inputTokens} tokens, Output: ${outputTokens} tokens, Total: ${totalTokens} tokens, Cost: $${costDetails.totalCost.toFixed(6)} USD`,
         {
           model: response.model,
+          mode: AI_MODE,
           duration_ms: duration,
           usage: response.usage,
           cost: costDetails,
@@ -289,30 +356,31 @@ app.post('/api/ai/chat', async (req, res) => {
       );
     }
 
-    console.log(`[AI-SERVICE] ✅ AI request completed - Job: ${job_id}, Duration: ${duration}ms, Tokens: ${costDetails.totalTokens}`);
+    console.log(`[AI-SERVICE] ✅ AI request completed - Job: ${requestJobId}, Duration: ${duration}ms, Tokens: ${costDetails.totalTokens}`);
 
-    // Return response in OpenAI format
+    // Step 7: Return response in OpenAI format
     res.json({
       id: response.id,
       model: response.model,
-      output_text: response.output_text,
-      output: response.output,
+      output_text: response.output_text || response.choices?.[0]?.message?.content || '',
+      output: response.output || (response.choices?.[0]?.message?.content ? [{ type: 'output_text', text: response.choices[0].message.content }] : []),
       usage: response.usage,
-      finish_reason: response.finish_reason || 'stop',
+      finish_reason: response.finish_reason || response.choices?.[0]?.finish_reason || 'stop',
       status: response.status || 'completed'
     });
 
   } catch (error) {
     const duration = Date.now() - startTime;
-    console.error(`[AI-SERVICE] ❌ AI request failed - Job: ${job_id}, Error:`, error.message);
+    console.error(`[AI-SERVICE] ❌ AI request failed - Job: ${requestJobId}, Error:`, error.message);
 
     // Log error
-    if (job_id) {
-      await logToBackend(job_id, 'error', 
+    if (requestJobId) {
+      await logToBackend(requestJobId, 'error', 
         `❌ AI request failed: ${error.message}`,
         {
           model,
-          project_id,
+          project_id: requestProjectId,
+          mode: AI_MODE,
           error: error.message,
           error_stack: error.stack,
           duration_ms: duration,
@@ -332,10 +400,69 @@ app.post('/api/ai/chat', async (req, res) => {
   }
 });
 
+/**
+ * Convert Responses API input to chat messages (for LM Studio)
+ */
+function convertInputToMessages(input) {
+  if (!Array.isArray(input)) {
+    return [{ role: 'user', content: 'Hello' }];
+  }
+  
+  return input.map(item => {
+    if (item.type === 'message') {
+      const content = item.content || [];
+      const textParts = content
+        .filter(c => c.type === 'input_text')
+        .map(c => c.text)
+        .join('\n');
+      
+      return {
+        role: item.role || 'user',
+        content: textParts || 'Hello'
+      };
+    }
+    return { role: 'user', content: 'Hello' };
+  });
+}
+
+/**
+ * Convert chat completion response to Responses API format
+ */
+function convertChatToResponses(chatResponse) {
+  const choice = chatResponse.choices?.[0];
+  const message = choice?.message;
+  
+  return {
+    id: chatResponse.id || `chatcmpl-${Date.now()}`,
+    model: chatResponse.model,
+    output_text: message?.content || '',
+    output: [
+      {
+        type: 'output_text',
+        text: message?.content || ''
+      }
+    ],
+    usage: chatResponse.usage || {
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      total_tokens: 0
+    },
+    finish_reason: choice?.finish_reason || 'stop',
+    status: 'completed'
+  };
+}
+
 // Start server
 app.listen(PORT, () => {
   console.log(`🚀 AionQA AI Service running on port ${PORT}`);
   console.log(`📡 Backend URL: ${BACKEND_URL}`);
-  console.log(`🔑 OpenAI API key configured: ${!!process.env.OPENAI_API_KEY}`);
+  console.log(`🤖 LLM Mode: ${AI_MODE}`);
+  console.log(`🔑 LLM configured: ${!!llmClient}`);
+  if (AI_MODE === 'openai') {
+    console.log(`   OpenAI API key: ${llmConfig.apiKey ? '✅ Configured' : '❌ Missing'}`);
+  } else if (AI_MODE === 'openai-compatible') {
+    console.log(`   Base URL: ${llmConfig.baseURL || 'Not configured'}`);
+  } else if (AI_MODE === 'lm-studio') {
+    console.log(`   LM Studio URL: ${llmConfig.url}`);
+  }
 });
-

@@ -1,0 +1,142 @@
+/**
+ * LLM Provider Factory
+ * Supports multiple LLM backends: OpenAI, OpenAI-compatible, LM Studio
+ */
+
+import OpenAI from 'openai';
+import axios from 'axios';
+
+/**
+ * Create LLM client based on mode
+ */
+export function createLLMClient(mode, config) {
+  switch (mode) {
+    case 'openai':
+      return createOpenAIClient(config);
+    case 'openai-compatible':
+      return createOpenAICompatibleClient(config);
+    case 'lm-studio':
+      return createLMStudioClient(config);
+    default:
+      throw new Error(`Unsupported LLM mode: ${mode}`);
+  }
+}
+
+/**
+ * OpenAI client (direct OpenAI API)
+ */
+function createOpenAIClient(config) {
+  const apiKey = config.apiKey || process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    throw new Error('OPENAI_API_KEY is required for OpenAI mode');
+  }
+  
+  return new OpenAI({
+    apiKey: apiKey,
+    baseURL: config.baseURL || 'https://api.openai.com/v1'
+  });
+}
+
+/**
+ * OpenAI-compatible client (any API that follows OpenAI format)
+ */
+function createOpenAICompatibleClient(config) {
+  const apiKey = config.apiKey || process.env.OPENAI_API_KEY || 'not-needed';
+  const baseURL = config.baseURL || config.url || process.env.LLM_BASE_URL;
+  
+  if (!baseURL) {
+    throw new Error('LLM_BASE_URL is required for openai-compatible mode');
+  }
+  
+  return new OpenAI({
+    apiKey: apiKey,
+    baseURL: baseURL
+  });
+}
+
+/**
+ * LM Studio client (HTTP API format)
+ */
+function createLMStudioClient(config) {
+  const baseURL = config.url || process.env.LM_STUDIO_URL || 'http://localhost:1234';
+  const apiKey = config.apiKey || process.env.LM_STUDIO_API_KEY || null;
+  
+  return {
+    baseURL,
+    apiKey,
+    // Custom implementation for LM Studio
+    async chat(messages, options = {}) {
+      const response = await axios.post(
+        `${baseURL}/v1/chat/completions`,
+        {
+          messages: messages,
+          model: options.model || 'local-model',
+          temperature: options.temperature,
+          max_tokens: options.max_tokens,
+          ...options
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            ...(apiKey && { 'Authorization': `Bearer ${apiKey}` })
+          },
+          timeout: 300000
+        }
+      );
+      
+      return response.data;
+    }
+  };
+}
+
+/**
+ * Convert OpenAI Responses API input format to chat messages
+ */
+function convertInputToMessages(input) {
+  if (!Array.isArray(input)) {
+    return [{ role: 'user', content: 'Hello' }];
+  }
+  
+  return input.map(item => {
+    if (item.type === 'message') {
+      const content = item.content || [];
+      const textParts = content
+        .filter(c => c.type === 'input_text')
+        .map(c => c.text)
+        .join('\n');
+      
+      return {
+        role: item.role || 'user',
+        content: textParts || 'Hello'
+      };
+    }
+    return { role: 'user', content: 'Hello' };
+  });
+}
+
+/**
+ * Convert chat completion response to Responses API format
+ */
+function convertChatToResponses(chatResponse) {
+  const choice = chatResponse.choices?.[0];
+  const message = choice?.message;
+  
+  return {
+    id: chatResponse.id || `chatcmpl-${Date.now()}`,
+    model: chatResponse.model,
+    output_text: message?.content || '',
+    output: [
+      {
+        type: 'output_text',
+        text: message?.content || ''
+      }
+    ],
+    usage: chatResponse.usage || {
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      total_tokens: 0
+    },
+    finish_reason: choice?.finish_reason || 'stop',
+    status: 'completed'
+  };
+}
