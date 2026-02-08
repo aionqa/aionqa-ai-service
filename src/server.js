@@ -41,11 +41,16 @@ const llmConfig = {
   url: process.env.LM_STUDIO_URL || 'http://localhost:1234' // For lm-studio mode
 };
 
+// Display name for logs: Ollama when URL contains ollama, else LM Studio / openai / openai-compatible
+const LLM_DISPLAY_NAME = AI_MODE === 'lm-studio' && llmConfig.url && llmConfig.url.toLowerCase().includes('ollama')
+  ? 'Ollama'
+  : (AI_MODE === 'lm-studio' ? 'LM Studio' : AI_MODE);
+
 // Initialize LLM client
 let llmClient = null;
 try {
   llmClient = createLLMClient(AI_MODE, llmConfig);
-  console.log(`✅ LLM client initialized in ${AI_MODE} mode`);
+  console.log(`✅ LLM client initialized in ${LLM_DISPLAY_NAME} mode`);
 } catch (error) {
   console.error(`❌ Failed to initialize LLM client:`, error.message);
   if (AI_MODE === 'openai' && !llmConfig.apiKey) {
@@ -583,13 +588,13 @@ function convertChatToResponses(chatResponse) {
 app.listen(PORT, () => {
   console.log(`🚀 AionQA AI Service running on port ${PORT}`);
   console.log(`📡 Backend URL: ${BACKEND_URL}`);
-  console.log(`🤖 LLM Mode: ${AI_MODE}`);
+  console.log(`🤖 LLM Mode: ${LLM_DISPLAY_NAME}`);
   console.log(`🔑 LLM configured: ${!!llmClient}`);
   if (AI_MODE === 'openai') {
     console.log(`   OpenAI API key: ${llmConfig.apiKey ? '✅ Configured' : '❌ Missing'}`);
   } else if (AI_MODE === 'openai-compatible') {
     console.log(`   Base URL: ${llmConfig.baseURL || 'Not configured'}`);
   } else if (AI_MODE === 'lm-studio') {
-    console.log(`   LM Studio URL: ${llmConfig.url}`);
+    console.log(`   ${LLM_DISPLAY_NAME} URL: ${llmConfig.url}`);
   }
 });
