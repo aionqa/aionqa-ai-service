@@ -320,11 +320,12 @@ app.post('/api/ai/chat', async (req, res) => {
           // LM Studio: OpenAI-compatible POST /v1/chat/completions with model, messages, temperature, max_tokens
           const messages = convertInputToMessages(inputArray);
           validateChatMessages(messages);
+          const lmStudioModel = process.env.LM_STUDIO_MODEL || model || 'qwen2.5-vl-3b-instruct-img2code';
           if (attempt === 1) {
-            console.log(`[AI-SERVICE] LM Studio request: ${messages.length} messages, model: ${model}`);
+            console.log(`[AI-SERVICE] LM Studio request: ${messages.length} messages, model: ${lmStudioModel}`);
           }
           response = await llmClient.chat(messages, {
-            model: model || 'local-model',
+            model: lmStudioModel,
             temperature: temperature !== undefined ? temperature : 0.7,
             max_tokens: max_tokens !== undefined ? max_tokens : 1000,
             ...otherParams
