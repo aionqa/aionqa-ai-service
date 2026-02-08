@@ -64,16 +64,17 @@ function createLMStudioClient(config) {
   return {
     baseURL,
     apiKey,
-    // Custom implementation for LM Studio
+    // Custom implementation for LM Studio / Ollama (OpenAI-compatible)
+    // Do not send model: server uses its loaded/default model per public API usage.
     async chat(messages, options = {}) {
+      const { model, ...restOptions } = options;
       const response = await axios.post(
         `${baseURL}/v1/chat/completions`,
         {
-          messages: messages,
-          model: options.model || 'local-model',
-          temperature: options.temperature,
-          max_tokens: options.max_tokens,
-          ...options
+          messages,
+          ...(restOptions.temperature !== undefined && { temperature: restOptions.temperature }),
+          ...(restOptions.max_tokens !== undefined && { max_tokens: restOptions.max_tokens }),
+          ...restOptions
         },
         {
           headers: {

@@ -213,6 +213,8 @@ app.post('/api/ai/chat', async (req, res) => {
     ...otherParams
   } = req.body;
 
+  // LM Studio / Ollama: do not send model in request; server uses its loaded/default model (per public API usage).
+
   // Get token info from authentication middleware
   const tokenInfo = req.tokenInfo || {};
   const requestProjectId = project_id || tokenInfo.project_id;
@@ -307,12 +309,12 @@ app.post('/api/ai/chat', async (req, res) => {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         if (AI_MODE === 'lm-studio') {
-          // LM Studio uses chat format
+          // LM Studio / Ollama: chat format; do not send model (server uses loaded/default per API)
           const messages = convertInputToMessages(inputArray);
           if (attempt === 1) {
-            console.log(`[AI-SERVICE] LM Studio request: ${messages.length} messages, model: ${model}`);
+            console.log(`[AI-SERVICE] LM Studio/Ollama request: ${messages.length} messages (no model sent)`);
           } else {
-            console.log(`[AI-SERVICE] LM Studio retry attempt ${attempt}/${maxAttempts}: ${messages.length} messages, model: ${model}`);
+            console.log(`[AI-SERVICE] LM Studio/Ollama retry attempt ${attempt}/${maxAttempts}: ${messages.length} messages`);
           }
           
           // Validate messages format before sending
@@ -339,18 +341,15 @@ app.post('/api/ai/chat', async (req, res) => {
           }
           
           const requestPayload = {
-            messages: messages,
-            model: model || 'local-model',
+            messages,
             temperature: temperature !== undefined ? temperature : 0.7,
             max_tokens: max_tokens !== undefined ? max_tokens : 1000,
             ...otherParams
           };
           
-          // Log request payload for debugging 400 errors
           if (attempt === 1) {
-            console.log(`[AI-SERVICE] LM Studio request payload:`, JSON.stringify({
+            console.log(`[AI-SERVICE] LM Studio/Ollama request payload:`, JSON.stringify({
               messages_count: requestPayload.messages.length,
-              model: requestPayload.model,
               temperature: requestPayload.temperature,
               max_tokens: requestPayload.max_tokens,
               first_message_preview: requestPayload.messages[0] ? {
@@ -362,7 +361,6 @@ app.post('/api/ai/chat', async (req, res) => {
           }
           
           response = await llmClient.chat(messages, {
-            model: model || 'local-model',
             temperature: temperature !== undefined ? temperature : 0.7,
             max_tokens: max_tokens !== undefined ? max_tokens : 1000,
             ...otherParams
