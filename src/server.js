@@ -30,21 +30,19 @@ console.log(`[AI-SERVICE] 🏷️  Service Version: ${SERVICE_VERSION}`);
 console.log(`[AI-SERVICE] 📅 Build Date: ${BUILD_DATE}`);
 
 // LLM Mode configuration
-const AI_MODE = process.env.AI_MODE || 'openai'; // openai, openai-compatible, lm-studio
+const AI_MODE = process.env.AI_MODE || 'openai'; // openai, openai-compatible, lm-studio, ollama
 const AI_SERVICE_TOKEN = process.env.AI_SERVICE_TOKEN; // Optional: for direct access (helpers)
 
 // LLM Configuration based on mode
 const llmConfig = {
   mode: AI_MODE,
-  apiKey: process.env.OPENAI_API_KEY || process.env.LM_STUDIO_API_KEY || null, // For openai or LM Studio auth
-  baseURL: process.env.LLM_BASE_URL, // For openai-compatible mode
-  url: process.env.LM_STUDIO_URL || 'http://localhost:1234' // For lm-studio mode
+  apiKey: process.env.OPENAI_API_KEY || process.env.LM_STUDIO_API_KEY || null,
+  baseURL: process.env.LLM_BASE_URL,
+  url: process.env.OLLAMA_URL || process.env.LM_STUDIO_URL || (AI_MODE === 'ollama' ? 'http://localhost:11434' : 'http://localhost:1234')
 };
 
-// Display name for logs: Ollama when URL contains ollama, else LM Studio / openai / openai-compatible
-const LLM_DISPLAY_NAME = AI_MODE === 'lm-studio' && llmConfig.url && llmConfig.url.toLowerCase().includes('ollama')
-  ? 'Ollama'
-  : (AI_MODE === 'lm-studio' ? 'LM Studio' : AI_MODE);
+// Display name for logs
+const LLM_DISPLAY_NAME = AI_MODE === 'ollama' ? 'Ollama' : (AI_MODE === 'lm-studio' ? 'LM Studio' : AI_MODE);
 
 // Initialize LLM client
 let llmClient = null;
@@ -308,64 +306,29 @@ app.post('/api/ai/chat', async (req, res) => {
     
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        if (AI_MODE === 'lm-studio') {
-          // LM Studio / Ollama: chat format; do not send model (server uses loaded/default per API)
+        if (AI_MODE === 'ollama') {
+          // Ollama: native POST /api/chat (docs.ollama.com/api/chat) with model + messages
           const messages = convertInputToMessages(inputArray);
+          validateChatMessages(messages);
+          const ollamaModel = process.env.OLLAMA_MODEL || 'llama3.2';
           if (attempt === 1) {
-            console.log(`[AI-SERVICE] LM Studio/Ollama request: ${messages.length} messages (no model sent)`);
-          } else {
-            console.log(`[AI-SERVICE] LM Studio/Ollama retry attempt ${attempt}/${maxAttempts}: ${messages.length} messages`);
+            console.log(`[AI-SERVICE] Ollama request: ${messages.length} messages, model: ${ollamaModel}`);
           }
-          
-          // Validate messages format before sending
-          if (!Array.isArray(messages) || messages.length === 0) {
-            throw new Error(`Invalid messages format: expected array, got ${typeof messages}`);
-          }
-          
-          // Validate each message has required fields
-          for (let i = 0; i < messages.length; i++) {
-            const msg = messages[i];
-            if (!msg.role || !msg.content) {
-              console.error(`[AI-SERVICE] Invalid message at index ${i}:`, JSON.stringify(msg));
-              throw new Error(`Message at index ${i} missing required fields (role or content)`);
-            }
-            // Ensure content is a string (LM Studio requires string content)
-            if (typeof msg.content !== 'string') {
-              if (Array.isArray(msg.content)) {
-                // Convert array content to string
-                msg.content = msg.content.map(c => typeof c === 'string' ? c : (c.text || JSON.stringify(c))).join('\n');
-              } else {
-                msg.content = String(msg.content || '');
-              }
-            }
-          }
-          
-          const requestPayload = {
-            messages,
-            temperature: temperature !== undefined ? temperature : 0.7,
-            max_tokens: max_tokens !== undefined ? max_tokens : 1000,
-            ...otherParams
-          };
-          
+          response = await llmClient.chat(messages, { model: ollamaModel });
+          response = convertChatToResponses(response);
+        } else if (AI_MODE === 'lm-studio') {
+          // LM Studio: OpenAI-compatible POST /v1/chat/completions with model, messages, temperature, max_tokens
+          const messages = convertInputToMessages(inputArray);
+          validateChatMessages(messages);
           if (attempt === 1) {
-            console.log(`[AI-SERVICE] LM Studio/Ollama request payload:`, JSON.stringify({
-              messages_count: requestPayload.messages.length,
-              temperature: requestPayload.temperature,
-              max_tokens: requestPayload.max_tokens,
-              first_message_preview: requestPayload.messages[0] ? {
-                role: requestPayload.messages[0].role,
-                content_length: requestPayload.messages[0].content?.length || 0,
-                content_preview: requestPayload.messages[0].content?.substring(0, 100) || ''
-              } : null
-            }));
+            console.log(`[AI-SERVICE] LM Studio request: ${messages.length} messages, model: ${model}`);
           }
-          
           response = await llmClient.chat(messages, {
+            model: model || 'local-model',
             temperature: temperature !== undefined ? temperature : 0.7,
             max_tokens: max_tokens !== undefined ? max_tokens : 1000,
             ...otherParams
           });
-          // Convert to Responses format
           response = convertChatToResponses(response);
         } else {
           // OpenAI and OpenAI-compatible use Responses API
@@ -531,7 +494,29 @@ app.post('/api/ai/chat', async (req, res) => {
 });
 
 /**
- * Convert Responses API input to chat messages (for LM Studio)
+ * Validate and normalize chat messages (role + string content) for Ollama / LM Studio
+ */
+function validateChatMessages(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    throw new Error(`Invalid messages format: expected non-empty array, got ${typeof messages}`);
+  }
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (!msg.role || msg.content === undefined) {
+      throw new Error(`Message at index ${i} missing role or content`);
+    }
+    if (typeof msg.content !== 'string') {
+      if (Array.isArray(msg.content)) {
+        msg.content = msg.content.map(c => typeof c === 'string' ? c : (c?.text || JSON.stringify(c))).join('\n');
+      } else {
+        msg.content = String(msg.content ?? '');
+      }
+    }
+  }
+}
+
+/**
+ * Convert Responses API input to chat messages (for LM Studio / Ollama)
  */
 function convertInputToMessages(input) {
   if (!Array.isArray(input)) {
@@ -594,5 +579,7 @@ app.listen(PORT, () => {
     console.log(`   Base URL: ${llmConfig.baseURL || 'Not configured'}`);
   } else if (AI_MODE === 'lm-studio') {
     console.log(`   ${LLM_DISPLAY_NAME} URL: ${llmConfig.url}`);
+  } else if (AI_MODE === 'ollama') {
+    console.log(`   Ollama URL: ${llmConfig.url}, model: ${process.env.OLLAMA_MODEL || 'llama3.2'}`);
   }
 });

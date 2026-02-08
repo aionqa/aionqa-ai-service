@@ -17,6 +17,8 @@ export function createLLMClient(mode, config) {
       return createOpenAICompatibleClient(config);
     case 'lm-studio':
       return createLMStudioClient(config);
+    case 'ollama':
+      return createOllamaClient(config);
     default:
       throw new Error(`Unsupported LLM mode: ${mode}`);
   }
@@ -55,7 +57,7 @@ function createOpenAICompatibleClient(config) {
 }
 
 /**
- * LM Studio client (HTTP API format)
+ * LM Studio client - OpenAI-compatible /v1/chat/completions (per LM Studio docs)
  */
 function createLMStudioClient(config) {
   const baseURL = config.url || process.env.LM_STUDIO_URL || 'http://localhost:1234';
@@ -64,28 +66,66 @@ function createLMStudioClient(config) {
   return {
     baseURL,
     apiKey,
-    // Custom implementation for LM Studio / Ollama (OpenAI-compatible)
-    // Do not send model: server uses its loaded/default model per public API usage.
     async chat(messages, options = {}) {
-      const { model, ...restOptions } = options;
       const response = await axios.post(
         `${baseURL}/v1/chat/completions`,
         {
+          model: options.model || 'local-model',
           messages,
-          ...(restOptions.temperature !== undefined && { temperature: restOptions.temperature }),
-          ...(restOptions.max_tokens !== undefined && { max_tokens: restOptions.max_tokens }),
-          ...restOptions
+          temperature: options.temperature,
+          max_tokens: options.max_tokens,
+          ...options
         },
         {
           headers: {
             'Content-Type': 'application/json',
             ...(apiKey && { 'Authorization': `Bearer ${apiKey}` })
           },
-          timeout: 900000 // 15 minutes timeout for AI requests
+          timeout: 900000
         }
       );
-      
       return response.data;
+    }
+  };
+}
+
+/**
+ * Ollama client - native POST /api/chat (per https://docs.ollama.com/api/chat)
+ */
+function createOllamaClient(config) {
+  const baseURL = (config.url || process.env.OLLAMA_URL || process.env.LM_STUDIO_URL || 'http://localhost:11434').replace(/\/$/, '');
+  
+  return {
+    baseURL,
+    async chat(messages, options = {}) {
+      const model = options.model || process.env.OLLAMA_MODEL || 'llama3.2';
+      const response = await axios.post(
+        `${baseURL}/api/chat`,
+        {
+          model,
+          messages,
+          stream: false
+        },
+        {
+          headers: { 'Content-Type': 'application/json' },
+          timeout: 900000
+        }
+      );
+      const data = response.data;
+      // Map Ollama response to OpenAI-like shape for convertChatToResponses
+      return {
+        id: `chatcmpl-${Date.now()}`,
+        model: data.model || model,
+        choices: [{
+          message: { role: 'assistant', content: data.message?.content || '' },
+          finish_reason: 'stop'
+        }],
+        usage: {
+          prompt_tokens: data.prompt_eval_count ?? 0,
+          completion_tokens: data.eval_count ?? 0,
+          total_tokens: (data.prompt_eval_count ?? 0) + (data.eval_count ?? 0)
+        }
+      };
     }
   };
 }
