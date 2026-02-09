@@ -45,7 +45,9 @@ const llmConfig = {
 const LLM_DISPLAY_NAME = AI_MODE === 'ollama' ? 'Ollama' : (AI_MODE === 'lm-studio' ? 'LM Studio' : AI_MODE);
 
 /**
- * Ensure every object in a JSON schema has additionalProperties: false for OpenAI strict mode.
+ * Ensure every object in a JSON schema is valid for OpenAI strict mode:
+ * - additionalProperties: false
+ * - required: array including every key in properties (OpenAI requires this)
  * Mutates the schema in place.
  */
 function ensureStrictSchema(schema) {
@@ -55,7 +57,12 @@ function ensureStrictSchema(schema) {
       schema.additionalProperties = false;
     }
     if (schema.properties && typeof schema.properties === 'object') {
-      for (const key of Object.keys(schema.properties)) {
+      const propKeys = Object.keys(schema.properties);
+      // OpenAI strict mode: required must include every key in properties
+      schema.required = Array.isArray(schema.required)
+        ? [...new Set([...schema.required, ...propKeys])]
+        : [...propKeys];
+      for (const key of propKeys) {
         ensureStrictSchema(schema.properties[key]);
       }
     }
