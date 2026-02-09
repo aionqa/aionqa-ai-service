@@ -339,179 +339,126 @@ app.post('/api/ai/chat', async (req, res) => {
       throw new Error('Either "input" or "messages" must be provided');
     }
 
-    // Step 4: Make LLM API call based on mode (with retry logic)
+    // Step 4: Make LLM API call based on mode (no retry - fail immediately; crawler may try next ai_service if multiple configured)
     let response;
-    let lastError = null;
-    const maxAttempts = 2;
-    
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      try {
-        if (AI_MODE === 'ollama') {
-          // Ollama: native POST /api/chat; use format: 'json' or schema when JSON requested (docs.ollama.com/capabilities/structured-outputs)
-          const messages = convertInputToMessages(inputArray);
-          validateChatMessages(messages);
-          const ollamaModel = process.env.OLLAMA_MODEL || 'llama3.2';
-          const wantsJson = otherParams.text?.format?.type === 'json_object';
-          const ollamaFormat = wantsJson
-            ? (otherParams.response_schema && typeof otherParams.response_schema === 'object'
-                ? (otherParams.response_schema.schema || otherParams.response_schema)
-                : 'json')
-            : undefined;
-          if (attempt === 1) {
-            console.log(`[AI-SERVICE] Ollama request: ${messages.length} messages, model: ${ollamaModel}, format: ${ollamaFormat === 'json' ? 'json' : ollamaFormat ? 'schema' : 'none'}`);
-          }
-          response = await llmClient.chat(messages, {
-            model: ollamaModel,
-            ...(ollamaFormat && { format: ollamaFormat })
-          });
-          response = convertChatToResponses(response);
-        } else if (AI_MODE === 'lm-studio') {
-          // LM Studio: only accepts response_format.type 'json_schema' or 'text' (not json_object)
-          const messages = convertInputToMessages(inputArray);
-          validateChatMessages(messages);
-          const lmStudioModel = process.env.LM_STUDIO_MODEL || model || 'qwen2.5-vl-3b-instruct-img2code';
-          const wantsJson = otherParams.text?.format?.type === 'json_object';
-          let responseFormat = null;
-          if (wantsJson) {
-            const schema = otherParams.response_schema;
-            if (schema && typeof schema === 'object' && (schema.type === 'object' || schema.schema)) {
-              const rawSchema = schema.schema || schema;
-              responseFormat = {
-                type: 'json_schema',
-                json_schema: {
-                  name: schema.name || 'response',
-                  strict: true,
-                  schema: rawSchema
-                }
-              };
-            }
-            // When we want JSON but have no schema: do not send response_format (LM Studio rejects type: 'json_object').
-            // Prompt already asks for JSON; we parse the text response.
-          }
-          if (attempt === 1) {
-            console.log(`[AI-SERVICE] LM Studio request: ${messages.length} messages, model: ${lmStudioModel}, response_format: ${responseFormat ? 'json_schema' : 'none'}`);
-          }
-          response = await llmClient.chat(messages, {
-            model: lmStudioModel,
-            temperature: temperature !== undefined ? temperature : 0.7,
-            max_tokens: effectiveMaxTokens,
-            ...(responseFormat && { response_format: responseFormat }),
-            ...otherParams
-          });
-          response = convertChatToResponses(response);
-        } else {
-          // OpenAI and OpenAI-compatible: use response_format (text.format) with json_schema, not response_schema (400 Unknown parameter)
-          const { response_schema: responseSchema, ...openaiSafeParams } = otherParams;
-          const existingText = openaiSafeParams.text || {};
-          let textFormat = existingText.format;
-          if (responseSchema && typeof responseSchema === 'object' && (responseSchema.type === 'object' || responseSchema.schema)) {
-            const rawSchema = JSON.parse(JSON.stringify(responseSchema.schema || responseSchema));
-            ensureStrictSchema(rawSchema); // OpenAI strict mode requires additionalProperties: false on all objects
-            textFormat = {
+    try {
+      if (AI_MODE === 'ollama') {
+        // Ollama: native POST /api/chat; use format: 'json' or schema when JSON requested (docs.ollama.com/capabilities/structured-outputs)
+        const messages = convertInputToMessages(inputArray);
+        validateChatMessages(messages);
+        const ollamaModel = process.env.OLLAMA_MODEL || 'llama3.2';
+        const wantsJson = otherParams.text?.format?.type === 'json_object';
+        const ollamaFormat = wantsJson
+          ? (otherParams.response_schema && typeof otherParams.response_schema === 'object'
+              ? (otherParams.response_schema.schema || otherParams.response_schema)
+              : 'json')
+          : undefined;
+        console.log(`[AI-SERVICE] Ollama request: ${messages.length} messages, model: ${ollamaModel}, format: ${ollamaFormat === 'json' ? 'json' : ollamaFormat ? 'schema' : 'none'}`);
+        response = await llmClient.chat(messages, {
+          model: ollamaModel,
+          ...(ollamaFormat && { format: ollamaFormat })
+        });
+        response = convertChatToResponses(response);
+      } else if (AI_MODE === 'lm-studio') {
+        // LM Studio: only accepts response_format.type 'json_schema' or 'text' (not json_object)
+        const messages = convertInputToMessages(inputArray);
+        validateChatMessages(messages);
+        const lmStudioModel = process.env.LM_STUDIO_MODEL || model || 'qwen2.5-vl-3b-instruct-img2code';
+        const wantsJson = otherParams.text?.format?.type === 'json_object';
+        let responseFormat = null;
+        if (wantsJson) {
+          const schema = otherParams.response_schema;
+          if (schema && typeof schema === 'object' && (schema.type === 'object' || schema.schema)) {
+            const rawSchema = schema.schema || schema;
+            responseFormat = {
               type: 'json_schema',
-              name: responseSchema.name || 'response',
-              schema: rawSchema,
-              strict: true
-            };
-            if (attempt === 1) {
-              console.log(`[AI-SERVICE] OpenAI request: using response_format (text.format) with json_schema`);
-            }
-          }
-          const openaiRequest = {
-            model,
-            input: inputArray,
-            ...(temperature !== undefined && { temperature }),
-            ...(effectiveMaxTokens !== undefined && { max_tokens: effectiveMaxTokens }),
-            ...openaiSafeParams,
-            text: { ...existingText, format: textFormat }
-          };
-          
-          if (AI_MODE === 'openai') {
-            if (attempt > 1) {
-              console.log(`[AI-SERVICE] OpenAI retry attempt ${attempt}/${maxAttempts}: model: ${model}`);
-            }
-            response = await llmClient.responses.create(openaiRequest);
-          } else {
-            // OpenAI-compatible: try Responses API first, fallback to Chat API
-            try {
-              if (attempt > 1) {
-                console.log(`[AI-SERVICE] OpenAI-compatible retry attempt ${attempt}/${maxAttempts}: model: ${model}`);
+              json_schema: {
+                name: schema.name || 'response',
+                strict: true,
+                schema: rawSchema
               }
-              response = await llmClient.responses.create(openaiRequest);
-            } catch (error) {
-              // Fallback to chat API (same JSON request when text.format is json_object)
-              const messages = convertInputToMessages(inputArray);
-              const wantsJson = otherParams.text?.format?.type === 'json_object';
-              const { response_schema: _drop2, ...chatSafeParams } = otherParams;
-              const chatResponse = await llmClient.chat.completions.create({
-                model,
-                messages,
-                temperature,
-                max_tokens: effectiveMaxTokens,
-                ...(wantsJson && { response_format: { type: 'json_object' } }),
-                ...chatSafeParams
-              });
-              response = convertChatToResponses(chatResponse);
-            }
+            };
           }
         }
-        
-        // Success - break out of retry loop
-        if (attempt > 1) {
-          console.log(`[AI-SERVICE] ✅ Retry succeeded on attempt ${attempt}`);
+        console.log(`[AI-SERVICE] LM Studio request: ${messages.length} messages, model: ${lmStudioModel}, response_format: ${responseFormat ? 'json_schema' : 'none'}`);
+        response = await llmClient.chat(messages, {
+          model: lmStudioModel,
+          temperature: temperature !== undefined ? temperature : 0.7,
+          max_tokens: effectiveMaxTokens,
+          ...(responseFormat && { response_format: responseFormat }),
+          ...otherParams
+        });
+        response = convertChatToResponses(response);
+      } else {
+        // OpenAI and OpenAI-compatible: use response_format (text.format) with json_schema, not response_schema (400 Unknown parameter)
+        const { response_schema: responseSchema, ...openaiSafeParams } = otherParams;
+        const existingText = openaiSafeParams.text || {};
+        let textFormat = existingText.format;
+        if (responseSchema && typeof responseSchema === 'object' && (responseSchema.type === 'object' || responseSchema.schema)) {
+          const rawSchema = JSON.parse(JSON.stringify(responseSchema.schema || responseSchema));
+          ensureStrictSchema(rawSchema);
+          textFormat = {
+            type: 'json_schema',
+            name: responseSchema.name || 'response',
+            schema: rawSchema,
+            strict: true
+          };
+          console.log(`[AI-SERVICE] OpenAI request: using response_format (text.format) with json_schema`);
         }
-        break;
-        
-      } catch (error) {
-        lastError = error;
-        
-        // Log the error with detailed information
-        console.error(`[AI-SERVICE] ❌ LLM API call failed (attempt ${attempt}/${maxAttempts}):`, error.message);
-        if (error.response) {
-          console.error(`  Status: ${error.response.status}`);
-          console.error(`  Response data:`, JSON.stringify(error.response.data));
-          console.error(`  Response headers:`, JSON.stringify(error.response.headers));
+        const isGpt5 = model && String(model).toLowerCase().startsWith('gpt-5');
+        const openaiRequest = {
+          model,
+          input: inputArray,
+          ...(!isGpt5 && temperature !== undefined && { temperature }),
+          ...(effectiveMaxTokens !== undefined && { max_output_tokens: effectiveMaxTokens }),
+          ...openaiSafeParams,
+          text: { ...existingText, format: textFormat }
+        };
+        if (isGpt5) {
+          console.log(`[AI-SERVICE] GPT-5 model: using max_output_tokens, omitting temperature`);
         }
-        if (error.request) {
-          console.error(`  Request config:`, {
-            url: error.config?.url,
-            method: error.config?.method,
-            data_preview: error.config?.data ? (typeof error.config.data === 'string' ? error.config.data.substring(0, 500) : JSON.stringify(error.config.data).substring(0, 500)) : null
-          });
+        if (AI_MODE === 'openai') {
+          response = await llmClient.responses.create(openaiRequest);
+        } else {
+          try {
+            response = await llmClient.responses.create(openaiRequest);
+          } catch (error) {
+            const messages = convertInputToMessages(inputArray);
+            const wantsJson = otherParams.text?.format?.type === 'json_object';
+            const { response_schema: _drop2, ...chatSafeParams } = otherParams;
+            const chatResponse = await llmClient.chat.completions.create({
+              model,
+              messages,
+              temperature,
+              max_tokens: effectiveMaxTokens,
+              ...(wantsJson && { response_format: { type: 'json_object' } }),
+              ...chatSafeParams
+            });
+            response = convertChatToResponses(chatResponse);
+          }
         }
-        if (error.stack) {
-          console.error(`  Stack:`, error.stack);
-        }
-        
-        // Log to backend (use actualModel so job logs show correct model)
-        if (requestJobId) {
-          await logToBackend(requestJobId, 'error', 
-            `❌ AI request failed (attempt ${attempt}/${maxAttempts}): ${error.message}`,
-            {
-              model: actualModel,
-              project_id: requestProjectId,
-              mode: AI_MODE,
-              attempt,
-              max_attempts: maxAttempts,
-              error: error.message,
-              error_status: error.response?.status,
-              error_data: error.response?.data,
-              error_stack: error.stack,
-              status: attempt < maxAttempts ? 'retrying' : 'failed'
-            }
-          );
-        }
-        
-        // If this was the last attempt, throw the error
-        if (attempt === maxAttempts) {
-          throw error;
-        }
-        
-        // Wait a bit before retry (exponential backoff: 1s, 2s)
-        const retryDelay = attempt * 1000;
-        console.log(`[AI-SERVICE] ⏳ Waiting ${retryDelay}ms before retry...`);
-        await new Promise(resolve => setTimeout(resolve, retryDelay));
       }
+    } catch (error) {
+      console.error(`[AI-SERVICE] ❌ LLM API call failed:`, error.message);
+      if (error.response) {
+        console.error(`  Status: ${error.response.status}`);
+        console.error(`  Response data:`, JSON.stringify(error.response.data));
+      }
+      if (requestJobId) {
+        await logToBackend(requestJobId, 'error',
+          `❌ AI request failed: ${error.message}`,
+          {
+            model: actualModel,
+            project_id: requestProjectId,
+            mode: AI_MODE,
+            error: error.message,
+            error_status: error.response?.status,
+            error_data: error.response?.data,
+            status: 'failed'
+          }
+        );
+      }
+      throw error;
     }
 
     // Step 5: Calculate cost
