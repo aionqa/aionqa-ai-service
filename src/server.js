@@ -367,13 +367,29 @@ app.post('/api/ai/chat', async (req, res) => {
           });
           response = convertChatToResponses(response);
         } else {
-          // OpenAI and OpenAI-compatible use Responses API
+          // OpenAI and OpenAI-compatible: use response_format (text.format) with json_schema, not response_schema (400 Unknown parameter)
+          const { response_schema: responseSchema, ...openaiSafeParams } = otherParams;
+          const existingText = openaiSafeParams.text || {};
+          let textFormat = existingText.format;
+          if (responseSchema && typeof responseSchema === 'object' && (responseSchema.type === 'object' || responseSchema.schema)) {
+            const rawSchema = responseSchema.schema || responseSchema;
+            textFormat = {
+              type: 'json_schema',
+              name: responseSchema.name || 'response',
+              schema: rawSchema,
+              strict: true
+            };
+            if (attempt === 1) {
+              console.log(`[AI-SERVICE] OpenAI request: using response_format (text.format) with json_schema`);
+            }
+          }
           const openaiRequest = {
             model,
             input: inputArray,
             ...(temperature !== undefined && { temperature }),
             ...(max_tokens !== undefined && { max_tokens }),
-            ...otherParams
+            ...openaiSafeParams,
+            text: { ...existingText, format: textFormat }
           };
           
           if (AI_MODE === 'openai') {
@@ -392,13 +408,14 @@ app.post('/api/ai/chat', async (req, res) => {
               // Fallback to chat API (same JSON request when text.format is json_object)
               const messages = convertInputToMessages(inputArray);
               const wantsJson = otherParams.text?.format?.type === 'json_object';
+              const { response_schema: _drop2, ...chatSafeParams } = otherParams;
               const chatResponse = await llmClient.chat.completions.create({
                 model,
                 messages,
                 temperature,
                 max_tokens,
                 ...(wantsJson && { response_format: { type: 'json_object' } }),
-                ...otherParams
+                ...chatSafeParams
               });
               response = convertChatToResponses(chatResponse);
             }
