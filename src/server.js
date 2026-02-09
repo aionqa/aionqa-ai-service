@@ -58,10 +58,8 @@ function ensureStrictSchema(schema) {
     }
     if (schema.properties && typeof schema.properties === 'object') {
       const propKeys = Object.keys(schema.properties);
-      // OpenAI strict mode: required must include every key in properties
-      schema.required = Array.isArray(schema.required)
-        ? [...new Set([...schema.required, ...propKeys])]
-        : [...propKeys];
+      // OpenAI strict mode: required must equal the set of property keys (no more, no less)
+      schema.required = [...propKeys];
       for (const key of propKeys) {
         ensureStrictSchema(schema.properties[key]);
       }
