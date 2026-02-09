@@ -238,8 +238,11 @@ app.post('/api/ai/chat', async (req, res) => {
     model = 'gpt-5-mini',
     temperature,
     max_tokens,
+    max_output_tokens,
     ...otherParams
   } = req.body;
+  // Crawler sends max_output_tokens; LLM APIs use max_tokens
+  const effectiveMaxTokens = max_tokens !== undefined ? max_tokens : (max_output_tokens !== undefined ? max_output_tokens : 1000);
 
   // LM Studio / Ollama: do not send model in request; server uses its loaded/default model (per public API usage).
 
@@ -363,7 +366,7 @@ app.post('/api/ai/chat', async (req, res) => {
           });
           response = convertChatToResponses(response);
         } else if (AI_MODE === 'lm-studio') {
-          // LM Studio: OpenAI-compatible POST /v1/chat/completions; use response_format (json_object or json_schema per lmstudio.ai/docs/developer/openai-compat/structured-output)
+          // LM Studio: only accepts response_format.type 'json_schema' or 'text' (not json_object)
           const messages = convertInputToMessages(inputArray);
           validateChatMessages(messages);
           const lmStudioModel = process.env.LM_STUDIO_MODEL || model || 'qwen2.5-vl-3b-instruct-img2code';
@@ -381,17 +384,17 @@ app.post('/api/ai/chat', async (req, res) => {
                   schema: rawSchema
                 }
               };
-            } else {
-              responseFormat = { type: 'json_object' };
             }
+            // When we want JSON but have no schema: do not send response_format (LM Studio rejects type: 'json_object').
+            // Prompt already asks for JSON; we parse the text response.
           }
           if (attempt === 1) {
-            console.log(`[AI-SERVICE] LM Studio request: ${messages.length} messages, model: ${lmStudioModel}, response_format: ${responseFormat ? (responseFormat.type === 'json_schema' ? 'json_schema' : 'json_object') : 'none'}`);
+            console.log(`[AI-SERVICE] LM Studio request: ${messages.length} messages, model: ${lmStudioModel}, response_format: ${responseFormat ? 'json_schema' : 'none'}`);
           }
           response = await llmClient.chat(messages, {
             model: lmStudioModel,
             temperature: temperature !== undefined ? temperature : 0.7,
-            max_tokens: max_tokens !== undefined ? max_tokens : 1000,
+            max_tokens: effectiveMaxTokens,
             ...(responseFormat && { response_format: responseFormat }),
             ...otherParams
           });
@@ -418,7 +421,7 @@ app.post('/api/ai/chat', async (req, res) => {
             model,
             input: inputArray,
             ...(temperature !== undefined && { temperature }),
-            ...(max_tokens !== undefined && { max_tokens }),
+            ...(effectiveMaxTokens !== undefined && { max_tokens: effectiveMaxTokens }),
             ...openaiSafeParams,
             text: { ...existingText, format: textFormat }
           };
@@ -444,7 +447,7 @@ app.post('/api/ai/chat', async (req, res) => {
                 model,
                 messages,
                 temperature,
-                max_tokens,
+                max_tokens: effectiveMaxTokens,
                 ...(wantsJson && { response_format: { type: 'json_object' } }),
                 ...chatSafeParams
               });
