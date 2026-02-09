@@ -218,7 +218,14 @@ app.post('/api/ai/chat', async (req, res) => {
   const requestProjectId = project_id || tokenInfo.project_id;
   const requestJobId = job_id || tokenInfo.job_id;
 
-  console.log(`[AI-SERVICE] Received AI request - Job: ${requestJobId}, Model: ${model}, Mode: ${AI_MODE}`);
+  // Actual model used for this mode (so logs show LM Studio/Ollama model, not request's gpt-5-mini)
+  const actualModel = AI_MODE === 'ollama'
+    ? (process.env.OLLAMA_MODEL || 'llama3.2')
+    : AI_MODE === 'lm-studio'
+      ? (process.env.LM_STUDIO_MODEL || model || 'qwen2.5-vl-3b-instruct-img2code')
+      : model;
+
+  console.log(`[AI-SERVICE] Received AI request - Job: ${requestJobId}, Model: ${actualModel}, Mode: ${AI_MODE}`);
 
   try {
     // Step 1: Check eligibility (license/funds)
@@ -245,10 +252,10 @@ app.post('/api/ai/chat', async (req, res) => {
       }
     }
 
-    // Step 2: Log request start
+    // Step 2: Log request start (use actualModel so logs show LM Studio/Ollama model when applicable)
     if (requestJobId) {
-      await logToBackend(requestJobId, 'info', `🤖 AI Request: Model: ${model}, Mode: ${AI_MODE}`, {
-        model,
+      await logToBackend(requestJobId, 'info', `🤖 AI Request: Model: ${actualModel}, Mode: ${AI_MODE}`, {
+        model: actualModel,
         project_id: requestProjectId,
         job_id: requestJobId,
         mode: AI_MODE,
@@ -395,12 +402,12 @@ app.post('/api/ai/chat', async (req, res) => {
           console.error(`  Stack:`, error.stack);
         }
         
-        // Log to backend
+        // Log to backend (use actualModel so job logs show correct model)
         if (requestJobId) {
           await logToBackend(requestJobId, 'error', 
             `❌ AI request failed (attempt ${attempt}/${maxAttempts}): ${error.message}`,
             {
-              model,
+              model: actualModel,
               project_id: requestProjectId,
               mode: AI_MODE,
               attempt,
@@ -452,12 +459,13 @@ app.post('/api/ai/chat', async (req, res) => {
 
     console.log(`[AI-SERVICE] ✅ AI request completed - Job: ${requestJobId}, Duration: ${duration}ms, Tokens: ${costDetails.totalTokens}`);
 
-    // Step 7: Return response in OpenAI format
+    // Step 7: Return response in OpenAI format (normalize content to string for LM Studio array content)
+    const outText = typeof response.output_text === 'string' ? response.output_text : contentToString(response.choices?.[0]?.message?.content);
     res.json({
       id: response.id,
       model: response.model,
-      output_text: response.output_text || response.choices?.[0]?.message?.content || '',
-      output: response.output || (response.choices?.[0]?.message?.content ? [{ type: 'output_text', text: response.choices[0].message.content }] : []),
+      output_text: outText || '',
+      output: response.output?.length ? response.output : [{ type: 'output_text', text: outText || '' }],
       usage: response.usage,
       finish_reason: response.finish_reason || response.choices?.[0]?.finish_reason || 'stop',
       status: response.status || 'completed'
@@ -467,12 +475,12 @@ app.post('/api/ai/chat', async (req, res) => {
     const duration = Date.now() - startTime;
     console.error(`[AI-SERVICE] ❌ AI request failed - Job: ${requestJobId}, Error:`, error.message);
 
-    // Log error
+    // Log error (use actualModel so job logs show correct model)
     if (requestJobId) {
       await logToBackend(requestJobId, 'error', 
         `❌ AI request failed: ${error.message}`,
         {
-          model,
+          model: actualModel,
           project_id: requestProjectId,
           mode: AI_MODE,
           error: error.message,
@@ -541,21 +549,31 @@ function convertInputToMessages(input) {
   });
 }
 
+/** Normalize message content to string (LM Studio/OpenAI can return string or array of parts) */
+function contentToString(content) {
+  if (content == null) return '';
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content.map(p => (typeof p === 'string' ? p : (p?.text ?? (p?.type === 'text' && p.text != null ? p.text : '')))).filter(Boolean).join('');
+  }
+  return String(content);
+}
+
 /**
  * Convert chat completion response to Responses API format
  */
 function convertChatToResponses(chatResponse) {
   const choice = chatResponse.choices?.[0];
   const message = choice?.message;
-  
+  const text = contentToString(message?.content);
   return {
     id: chatResponse.id || `chatcmpl-${Date.now()}`,
     model: chatResponse.model,
-    output_text: message?.content || '',
+    output_text: text,
     output: [
       {
         type: 'output_text',
-        text: message?.content || ''
+        text
       }
     ],
     usage: chatResponse.usage || {
