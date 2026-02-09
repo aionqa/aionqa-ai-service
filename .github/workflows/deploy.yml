@@ -82,4 +82,3 @@ jobs:
             -H "X-Notify-New-Image-Secret: $NOTIFY_SECRET" \
             -d '{"image":"aionqa-ai-service"}' || true
           echo "✅ Notified backend (helpers will queue 'update' for aionqa-ai-service)."
-

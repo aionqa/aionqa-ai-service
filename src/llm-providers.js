@@ -91,6 +91,7 @@ function createLMStudioClient(config) {
 
 /**
  * Ollama client - native POST /api/chat (per https://docs.ollama.com/api/chat)
+ * Supports format: 'json' or a JSON schema object for structured output (docs.ollama.com/capabilities/structured-outputs)
  */
 function createOllamaClient(config) {
   const baseURL = (config.url || process.env.OLLAMA_URL || process.env.LM_STUDIO_URL || 'http://localhost:11434').replace(/\/$/, '');
@@ -99,13 +100,17 @@ function createOllamaClient(config) {
     baseURL,
     async chat(messages, options = {}) {
       const model = options.model || process.env.OLLAMA_MODEL || 'llama3.2';
+      const body = {
+        model,
+        messages,
+        stream: false
+      };
+      if (options.format !== undefined) {
+        body.format = options.format;
+      }
       const response = await axios.post(
         `${baseURL}/api/chat`,
-        {
-          model,
-          messages,
-          stream: false
-        },
+        body,
         {
           headers: { 'Content-Type': 'application/json' },
           timeout: 900000
@@ -183,21 +188,30 @@ function convertInputToMessages(input) {
   });
 }
 
+function contentToString(content) {
+  if (content == null) return '';
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content.map(p => (typeof p === 'string' ? p : (p?.text ?? (p?.type === 'text' && p.text != null ? p.text : '')))).filter(Boolean).join('');
+  }
+  return String(content);
+}
+
 /**
  * Convert chat completion response to Responses API format
  */
 function convertChatToResponses(chatResponse) {
   const choice = chatResponse.choices?.[0];
   const message = choice?.message;
-  
+  const text = contentToString(message?.content);
   return {
     id: chatResponse.id || `chatcmpl-${Date.now()}`,
     model: chatResponse.model,
-    output_text: message?.content || '',
+    output_text: text,
     output: [
       {
         type: 'output_text',
-        text: message?.content || ''
+        text
       }
     ],
     usage: chatResponse.usage || {

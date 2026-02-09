@@ -314,27 +314,55 @@ app.post('/api/ai/chat', async (req, res) => {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         if (AI_MODE === 'ollama') {
-          // Ollama: native POST /api/chat (docs.ollama.com/api/chat) with model + messages
+          // Ollama: native POST /api/chat; use format: 'json' or schema when JSON requested (docs.ollama.com/capabilities/structured-outputs)
           const messages = convertInputToMessages(inputArray);
           validateChatMessages(messages);
           const ollamaModel = process.env.OLLAMA_MODEL || 'llama3.2';
+          const wantsJson = otherParams.text?.format?.type === 'json_object';
+          const ollamaFormat = wantsJson
+            ? (otherParams.response_schema && typeof otherParams.response_schema === 'object'
+                ? (otherParams.response_schema.schema || otherParams.response_schema)
+                : 'json')
+            : undefined;
           if (attempt === 1) {
-            console.log(`[AI-SERVICE] Ollama request: ${messages.length} messages, model: ${ollamaModel}`);
+            console.log(`[AI-SERVICE] Ollama request: ${messages.length} messages, model: ${ollamaModel}, format: ${ollamaFormat === 'json' ? 'json' : ollamaFormat ? 'schema' : 'none'}`);
           }
-          response = await llmClient.chat(messages, { model: ollamaModel });
+          response = await llmClient.chat(messages, {
+            model: ollamaModel,
+            ...(ollamaFormat && { format: ollamaFormat })
+          });
           response = convertChatToResponses(response);
         } else if (AI_MODE === 'lm-studio') {
-          // LM Studio: OpenAI-compatible POST /v1/chat/completions with model, messages, temperature, max_tokens
+          // LM Studio: OpenAI-compatible POST /v1/chat/completions; use response_format (json_object or json_schema per lmstudio.ai/docs/developer/openai-compat/structured-output)
           const messages = convertInputToMessages(inputArray);
           validateChatMessages(messages);
           const lmStudioModel = process.env.LM_STUDIO_MODEL || model || 'qwen2.5-vl-3b-instruct-img2code';
+          const wantsJson = otherParams.text?.format?.type === 'json_object';
+          let responseFormat = null;
+          if (wantsJson) {
+            const schema = otherParams.response_schema;
+            if (schema && typeof schema === 'object' && (schema.type === 'object' || schema.schema)) {
+              const rawSchema = schema.schema || schema;
+              responseFormat = {
+                type: 'json_schema',
+                json_schema: {
+                  name: schema.name || 'response',
+                  strict: true,
+                  schema: rawSchema
+                }
+              };
+            } else {
+              responseFormat = { type: 'json_object' };
+            }
+          }
           if (attempt === 1) {
-            console.log(`[AI-SERVICE] LM Studio request: ${messages.length} messages, model: ${lmStudioModel}`);
+            console.log(`[AI-SERVICE] LM Studio request: ${messages.length} messages, model: ${lmStudioModel}, response_format: ${responseFormat ? (responseFormat.type === 'json_schema' ? 'json_schema' : 'json_object') : 'none'}`);
           }
           response = await llmClient.chat(messages, {
             model: lmStudioModel,
             temperature: temperature !== undefined ? temperature : 0.7,
             max_tokens: max_tokens !== undefined ? max_tokens : 1000,
+            ...(responseFormat && { response_format: responseFormat }),
             ...otherParams
           });
           response = convertChatToResponses(response);
@@ -361,13 +389,15 @@ app.post('/api/ai/chat', async (req, res) => {
               }
               response = await llmClient.responses.create(openaiRequest);
             } catch (error) {
-              // Fallback to chat API
+              // Fallback to chat API (same JSON request when text.format is json_object)
               const messages = convertInputToMessages(inputArray);
+              const wantsJson = otherParams.text?.format?.type === 'json_object';
               const chatResponse = await llmClient.chat.completions.create({
                 model,
                 messages,
                 temperature,
                 max_tokens,
+                ...(wantsJson && { response_format: { type: 'json_object' } }),
                 ...otherParams
               });
               response = convertChatToResponses(chatResponse);
