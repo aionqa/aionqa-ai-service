@@ -44,6 +44,36 @@ const llmConfig = {
 // Display name for logs
 const LLM_DISPLAY_NAME = AI_MODE === 'ollama' ? 'Ollama' : (AI_MODE === 'lm-studio' ? 'LM Studio' : AI_MODE);
 
+/**
+ * Ensure every object in a JSON schema has additionalProperties: false for OpenAI strict mode.
+ * Mutates the schema in place.
+ */
+function ensureStrictSchema(schema) {
+  if (!schema || typeof schema !== 'object') return;
+  if (schema.type === 'object') {
+    if (!('additionalProperties' in schema)) {
+      schema.additionalProperties = false;
+    }
+    if (schema.properties && typeof schema.properties === 'object') {
+      for (const key of Object.keys(schema.properties)) {
+        ensureStrictSchema(schema.properties[key]);
+      }
+    }
+  }
+  if (schema.items) {
+    ensureStrictSchema(Array.isArray(schema.items) ? schema.items[0] : schema.items);
+  }
+  for (const key of ['definitions', 'oneOf', 'anyOf', 'allOf']) {
+    if (schema[key] && Array.isArray(schema[key])) {
+      schema[key].forEach(ensureStrictSchema);
+    } else if (schema[key] && typeof schema[key] === 'object' && !Array.isArray(schema[key])) {
+      for (const k of Object.keys(schema[key])) {
+        ensureStrictSchema(schema[key][k]);
+      }
+    }
+  }
+}
+
 // Initialize LLM client
 let llmClient = null;
 try {
@@ -372,7 +402,8 @@ app.post('/api/ai/chat', async (req, res) => {
           const existingText = openaiSafeParams.text || {};
           let textFormat = existingText.format;
           if (responseSchema && typeof responseSchema === 'object' && (responseSchema.type === 'object' || responseSchema.schema)) {
-            const rawSchema = responseSchema.schema || responseSchema;
+            const rawSchema = JSON.parse(JSON.stringify(responseSchema.schema || responseSchema));
+            ensureStrictSchema(rawSchema); // OpenAI strict mode requires additionalProperties: false on all objects
             textFormat = {
               type: 'json_schema',
               name: responseSchema.name || 'response',
