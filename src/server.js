@@ -47,33 +47,38 @@ const LLM_DISPLAY_NAME = AI_MODE === 'ollama' ? 'Ollama' : (AI_MODE === 'lm-stud
 /**
  * Ensure every object in a JSON schema is valid for OpenAI strict mode:
  * - additionalProperties: false
- * - required: array including every key in properties (OpenAI requires this)
+ * - required: array including every key in properties (OpenAI requires this; no extra keys)
  * Mutates the schema in place.
  */
 function ensureStrictSchema(schema) {
   if (!schema || typeof schema !== 'object') return;
-  if (schema.type === 'object') {
+  // Normalize any node that has "properties" so required exactly matches property keys (fixes "Extra required key" from OpenAI)
+  if (schema.properties && typeof schema.properties === 'object') {
+    const propKeys = Object.keys(schema.properties);
+    schema.required = [...propKeys];
     if (!('additionalProperties' in schema)) {
       schema.additionalProperties = false;
     }
-    if (schema.properties && typeof schema.properties === 'object') {
-      const propKeys = Object.keys(schema.properties);
-      // OpenAI strict mode: required must equal the set of property keys (no more, no less)
-      schema.required = [...propKeys];
-      for (const key of propKeys) {
-        ensureStrictSchema(schema.properties[key]);
-      }
+    for (const key of propKeys) {
+      ensureStrictSchema(schema.properties[key]);
     }
+  }
+  if (schema.type === 'object' && !('additionalProperties' in schema)) {
+    schema.additionalProperties = false;
   }
   if (schema.items) {
     ensureStrictSchema(Array.isArray(schema.items) ? schema.items[0] : schema.items);
   }
-  for (const key of ['definitions', 'oneOf', 'anyOf', 'allOf']) {
+  for (const key of ['definitions', 'oneOf', 'anyOf', 'allOf', 'schema']) {
     if (schema[key] && Array.isArray(schema[key])) {
       schema[key].forEach(ensureStrictSchema);
     } else if (schema[key] && typeof schema[key] === 'object' && !Array.isArray(schema[key])) {
-      for (const k of Object.keys(schema[key])) {
-        ensureStrictSchema(schema[key][k]);
+      if (key === 'schema') {
+        ensureStrictSchema(schema[key]);
+      } else {
+        for (const k of Object.keys(schema[key])) {
+          ensureStrictSchema(schema[key][k]);
+        }
       }
     }
   }
