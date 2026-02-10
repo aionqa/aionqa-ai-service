@@ -48,19 +48,32 @@ const LLM_DISPLAY_NAME = AI_MODE === 'ollama' ? 'Ollama' : (AI_MODE === 'lm-stud
  * Ensure every object in a JSON schema is valid for OpenAI strict mode:
  * - additionalProperties: false
  * - required: array including every key in properties (OpenAI requires this; no extra keys)
+ * - object types without "properties" get properties: {}, required: [] so they are not dropped by the API
  * Mutates the schema in place.
  */
 function ensureStrictSchema(schema) {
   if (!schema || typeof schema !== 'object') return;
-  // Normalize any node that has "properties" so required exactly matches property keys (fixes "Extra required key" from OpenAI)
+  // Fix object types that have no "properties" (OpenAI may drop them and then "required" has extra keys)
+  if (schema.type === 'object' && !(schema.properties && typeof schema.properties === 'object')) {
+    schema.properties = {};
+    schema.additionalProperties = false;
+    schema.required = [];
+  }
+  // Normalize any node that has "properties": fix children first so nested object types get explicit properties
   if (schema.properties && typeof schema.properties === 'object') {
     const propKeys = Object.keys(schema.properties);
+    for (const key of propKeys) {
+      const child = schema.properties[key];
+      if (child && child.type === 'object' && !(child.properties && typeof child.properties === 'object')) {
+        child.properties = {};
+        child.additionalProperties = false;
+        child.required = [];
+      }
+      ensureStrictSchema(child);
+    }
     schema.required = [...propKeys];
     if (!('additionalProperties' in schema)) {
       schema.additionalProperties = false;
-    }
-    for (const key of propKeys) {
-      ensureStrictSchema(schema.properties[key]);
     }
   }
   if (schema.type === 'object' && !('additionalProperties' in schema)) {
@@ -81,6 +94,23 @@ function ensureStrictSchema(schema) {
         }
       }
     }
+  }
+}
+
+/** Remove any key from required that is not in properties (safety net for "Extra required key" from OpenAI). */
+function stripExtraRequired(schema) {
+  if (!schema || typeof schema !== 'object') return;
+  if (schema.properties && typeof schema.properties === 'object' && Array.isArray(schema.required)) {
+    const propSet = new Set(Object.keys(schema.properties));
+    schema.required = schema.required.filter((k) => propSet.has(k));
+  }
+  if (schema.properties) {
+    for (const k of Object.keys(schema.properties)) {
+      stripExtraRequired(schema.properties[k]);
+    }
+  }
+  if (schema.items) {
+    stripExtraRequired(Array.isArray(schema.items) ? schema.items[0] : schema.items);
   }
 }
 
@@ -407,6 +437,7 @@ app.post('/api/ai/chat', async (req, res) => {
         if (responseSchema && typeof responseSchema === 'object' && (responseSchema.type === 'object' || responseSchema.schema)) {
           const rawSchema = JSON.parse(JSON.stringify(responseSchema.schema || responseSchema));
           ensureStrictSchema(rawSchema);
+          stripExtraRequired(rawSchema);
           textFormat = {
             type: 'json_schema',
             name: responseSchema.name || 'response',
