@@ -446,10 +446,29 @@ app.post('/api/ai/chat', async (req, res) => {
           };
           console.log(`[AI-SERVICE] OpenAI request: using response_format (text.format) with json_schema`);
         }
+        // When requiring JSON: prepend strict instruction so model returns JSON only (no markdown)
+        let requestInput = inputArray;
+        if (textFormat && (textFormat.type === 'json_schema' || textFormat.type === 'json_object')) {
+          const jsonOnlyPrefix = 'Respond with valid JSON only. No markdown, no code blocks.\n\n';
+          let prepended = false;
+          requestInput = inputArray.map((item) => {
+            if (item.type !== 'message' || !Array.isArray(item.content) || prepended) return item;
+            const content = item.content.map((c) => {
+              if (!prepended && c.type === 'input_text' && typeof c.text === 'string') {
+                prepended = true;
+                if (!c.text.startsWith(jsonOnlyPrefix.trim())) {
+                  return { ...c, text: jsonOnlyPrefix + c.text };
+                }
+              }
+              return c;
+            });
+            return { ...item, content };
+          });
+        }
         const isGpt5 = model && String(model).toLowerCase().startsWith('gpt-5');
         const openaiRequest = {
           model,
-          input: inputArray,
+          input: requestInput,
           ...(!isGpt5 && temperature !== undefined && { temperature }),
           ...(effectiveMaxTokens !== undefined && { max_output_tokens: effectiveMaxTokens }),
           ...openaiSafeParams,
