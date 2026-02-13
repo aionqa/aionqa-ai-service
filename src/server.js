@@ -282,7 +282,7 @@ app.post('/api/ai/chat', async (req, res) => {
     ...otherParams
   } = req.body;
   // Crawler sends max_output_tokens; LLM APIs use max_tokens
-  const effectiveMaxTokens = max_tokens !== undefined ? max_tokens : (max_output_tokens !== undefined ? max_output_tokens : 1000);
+  const effectiveMaxTokens = max_tokens !== undefined ? max_tokens : (max_output_tokens !== undefined ? max_output_tokens : 128000);
 
   // LM Studio / Ollama: do not send model in request; server uses its loaded/default model (per public API usage).
 
@@ -432,14 +432,19 @@ app.post('/api/ai/chat', async (req, res) => {
       } else {
         // OpenAI and OpenAI-compatible: use response_format (text.format) with json_schema, not response_schema (400 Unknown parameter)
         const { response_schema: responseSchema, reasoning: reqReasoning, reasoning_effort: reqReasoningEffort, ...openaiSafeParams } = otherParams;
-        // Normalize reasoning for OpenAI Responses API: expects reasoning: { effort: "medium" }, not reasoning: true + reasoning_effort
-        const useReasoning = reqReasoning === true || (reqReasoning && typeof reqReasoning === 'object');
-        const reasoningObj = useReasoning
+        // Normalize reasoning for OpenAI Responses API: expects reasoning: { effort: "medium" } or { effort: "none" }
+        const useReasoning = reqReasoning === true || (reqReasoning && typeof reqReasoning === 'object' && reqReasoning?.effort !== 'none');
+        let reasoningObj = useReasoning
           ? (typeof reqReasoning === 'object' && reqReasoning?.effort
               ? reqReasoning
               : { effort: reqReasoningEffort || 'medium' })
           : undefined;
-        if (useReasoning && reasoningObj) {
+        // GPT-5 reasons by default; when disabled we must explicitly send effort: "none"
+        const isGpt5OrReasoningModel = model && /^gpt-5|^gpt-4\.1|^o4/i.test(String(model));
+        if (!reasoningObj && isGpt5OrReasoningModel) {
+          reasoningObj = { effort: 'none' };
+          console.log(`[AI-SERVICE] Reasoning disabled for GPT-5/4.1/o4: effort=none`);
+        } else if (useReasoning && reasoningObj) {
           console.log(`[AI-SERVICE] OpenAI reasoning: effort=${reasoningObj.effort || 'medium'}`);
         }
         const existingText = openaiSafeParams.text || {};
