@@ -268,6 +268,17 @@ app.get('/health', (req, res) => {
  * Main AI request endpoint
  * Receives requests from crawlers and proxies to LLM
  */
+// Environment overrides: when set, take priority over request params (used by ai.aionqa.com)
+const ENV_OVERRIDE_MODEL = process.env.OPENAI_OVERRIDE_MODEL || process.env.OPENAI_DEFAULT_MODEL;
+const _envMax = process.env.OPENAI_OVERRIDE_MAX_OUTPUT_TOKENS;
+const ENV_OVERRIDE_MAX_OUTPUT_TOKENS = (_envMax != null && _envMax !== '') ? (parseInt(_envMax, 10) || null) : null;
+const ENV_OVERRIDE_REASONING = process.env.OPENAI_OVERRIDE_REASONING_ENABLED != null
+  ? /^(true|1|yes)$/i.test(process.env.OPENAI_OVERRIDE_REASONING_ENABLED)
+  : null; // null = not set, true/false = override
+if (ENV_OVERRIDE_MODEL || ENV_OVERRIDE_MAX_OUTPUT_TOKENS != null || ENV_OVERRIDE_REASONING !== null) {
+  console.log(`[AI-SERVICE] Environment overrides: model=${ENV_OVERRIDE_MODEL || 'none'}, max_output_tokens=${ENV_OVERRIDE_MAX_OUTPUT_TOKENS ?? 'none'}, reasoning_enabled=${ENV_OVERRIDE_REASONING}`);
+}
+
 app.post('/api/ai/chat', async (req, res) => {
   const startTime = Date.now();
   const {
@@ -275,14 +286,17 @@ app.post('/api/ai/chat', async (req, res) => {
     job_id,
     messages,
     input, // Responses API format (already in correct format)
-    model = 'gpt-5-mini',
+    model: reqModel = 'gpt-5-mini',
     temperature,
     max_tokens,
     max_output_tokens,
     ...otherParams
   } = req.body;
-  // Crawler sends max_output_tokens; LLM APIs use max_tokens
-  const effectiveMaxTokens = max_tokens !== undefined ? max_tokens : (max_output_tokens !== undefined ? max_output_tokens : 128000);
+  // Environment overrides take priority over request params
+  const model = ENV_OVERRIDE_MODEL || reqModel;
+  const effectiveMaxTokens = ENV_OVERRIDE_MAX_OUTPUT_TOKENS != null
+    ? ENV_OVERRIDE_MAX_OUTPUT_TOKENS
+    : (max_tokens !== undefined ? max_tokens : (max_output_tokens !== undefined ? max_output_tokens : 128000));
 
   // LM Studio / Ollama: do not send model in request; server uses its loaded/default model (per public API usage).
 
@@ -432,20 +446,30 @@ app.post('/api/ai/chat', async (req, res) => {
       } else {
         // OpenAI and OpenAI-compatible: use response_format (text.format) with json_schema, not response_schema (400 Unknown parameter)
         const { response_schema: responseSchema, reasoning: reqReasoning, reasoning_effort: reqReasoningEffort, ...openaiSafeParams } = otherParams;
-        // Normalize reasoning for OpenAI Responses API: expects reasoning: { effort: "medium" } or { effort: "none" }
-        const useReasoning = reqReasoning === true || (reqReasoning && typeof reqReasoning === 'object' && reqReasoning?.effort !== 'none');
-        let reasoningObj = useReasoning
-          ? (typeof reqReasoning === 'object' && reqReasoning?.effort
-              ? reqReasoning
-              : { effort: reqReasoningEffort || 'medium' })
-          : undefined;
-        // GPT-5 reasons by default; when disabled we must explicitly send effort: "none"
-        const isGpt5OrReasoningModel = model && /^gpt-5|^gpt-4\.1|^o4/i.test(String(model));
-        if (!reasoningObj && isGpt5OrReasoningModel) {
+        // Environment override for reasoning takes priority
+        let reasoningObj;
+        if (ENV_OVERRIDE_REASONING === false) {
           reasoningObj = { effort: 'none' };
-          console.log(`[AI-SERVICE] Reasoning disabled for GPT-5/4.1/o4: effort=none`);
-        } else if (useReasoning && reasoningObj) {
-          console.log(`[AI-SERVICE] OpenAI reasoning: effort=${reasoningObj.effort || 'medium'}`);
+          console.log(`[AI-SERVICE] Reasoning disabled by environment override`);
+        } else if (ENV_OVERRIDE_REASONING === true) {
+          reasoningObj = { effort: reqReasoningEffort || 'medium' };
+          console.log(`[AI-SERVICE] Reasoning enabled by environment override: effort=${reasoningObj.effort}`);
+        } else {
+          // Normalize reasoning for OpenAI Responses API: expects reasoning: { effort: "medium" } or { effort: "none" }
+          const useReasoning = reqReasoning === true || (reqReasoning && typeof reqReasoning === 'object' && reqReasoning?.effort !== 'none');
+          reasoningObj = useReasoning
+            ? (typeof reqReasoning === 'object' && reqReasoning?.effort
+                ? reqReasoning
+                : { effort: reqReasoningEffort || 'medium' })
+            : undefined;
+          // GPT-5 reasons by default; when disabled we must explicitly send effort: "none"
+          const isGpt5OrReasoningModel = model && /^gpt-5|^gpt-4\.1|^o4/i.test(String(model));
+          if (!reasoningObj && isGpt5OrReasoningModel) {
+            reasoningObj = { effort: 'none' };
+            console.log(`[AI-SERVICE] Reasoning disabled for GPT-5/4.1/o4: effort=none`);
+          } else if (useReasoning && reasoningObj) {
+            console.log(`[AI-SERVICE] OpenAI reasoning: effort=${reasoningObj.effort || 'medium'}`);
+          }
         }
         const existingText = openaiSafeParams.text || {};
         let textFormat = existingText.format;
