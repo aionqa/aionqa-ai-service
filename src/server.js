@@ -320,9 +320,17 @@ app.post('/api/ai/chat', async (req, res) => {
       const eligibility = await checkEligibility(requestProjectId, requestJobId, model);
       if (!eligibility.eligible) {
         const errorMsg = `Request not eligible: ${eligibility.reason || 'Unknown reason'}`;
+        const reasonText = String(eligibility.reason || '').toLowerCase();
+        const isTransientGatewayIssue =
+          reasonText.includes('status code 502') ||
+          reasonText.includes('status code 503') ||
+          reasonText.includes('status code 504') ||
+          reasonText.includes('bad gateway') ||
+          reasonText.includes('gateway timeout');
+        const logLevel = isTransientGatewayIssue ? 'warn' : 'error';
         console.warn(`[AI-SERVICE] ${errorMsg}`);
         
-        await logToBackend(requestJobId, 'error', `❌ ${errorMsg}`, {
+        await logToBackend(requestJobId, logLevel, `${isTransientGatewayIssue ? '⚠️' : '❌'} ${errorMsg}`, {
           model,
           project_id: requestProjectId,
           eligibility
