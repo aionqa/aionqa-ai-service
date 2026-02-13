@@ -449,8 +449,9 @@ app.post('/api/ai/chat', async (req, res) => {
         // Environment override for reasoning takes priority
         let reasoningObj;
         if (ENV_OVERRIDE_REASONING === false) {
-          reasoningObj = { effort: 'none' };
-          console.log(`[AI-SERVICE] Reasoning disabled by environment override`);
+          // gpt-5-nano does not support 'none', use 'minimal' (lowest effort)
+          reasoningObj = { effort: 'minimal' };
+          console.log(`[AI-SERVICE] Reasoning minimized by environment override: effort=minimal`);
         } else if (ENV_OVERRIDE_REASONING === true) {
           reasoningObj = { effort: reqReasoningEffort || 'medium' };
           console.log(`[AI-SERVICE] Reasoning enabled by environment override: effort=${reasoningObj.effort}`);
@@ -459,14 +460,15 @@ app.post('/api/ai/chat', async (req, res) => {
           const useReasoning = reqReasoning === true || (reqReasoning && typeof reqReasoning === 'object' && reqReasoning?.effort !== 'none');
           reasoningObj = useReasoning
             ? (typeof reqReasoning === 'object' && reqReasoning?.effort
-                ? reqReasoning
+                ? { effort: reqReasoning.effort === 'none' ? 'minimal' : reqReasoning.effort }
                 : { effort: reqReasoningEffort || 'medium' })
             : undefined;
           // GPT-5 reasons by default; when disabled we must explicitly send effort: "none"
           const isGpt5OrReasoningModel = model && /^gpt-5|^gpt-4\.1|^o4/i.test(String(model));
           if (!reasoningObj && isGpt5OrReasoningModel) {
-            reasoningObj = { effort: 'none' };
-            console.log(`[AI-SERVICE] Reasoning disabled for GPT-5/4.1/o4: effort=none`);
+            // gpt-5-nano does not support 'none', use 'minimal' (lowest effort)
+            reasoningObj = { effort: 'minimal' };
+            console.log(`[AI-SERVICE] Reasoning minimized for GPT-5/4.1/o4: effort=minimal`);
           } else if (useReasoning && reasoningObj) {
             console.log(`[AI-SERVICE] OpenAI reasoning: effort=${reasoningObj.effort || 'medium'}`);
           }
