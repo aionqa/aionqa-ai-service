@@ -431,7 +431,17 @@ app.post('/api/ai/chat', async (req, res) => {
         response = convertChatToResponses(response);
       } else {
         // OpenAI and OpenAI-compatible: use response_format (text.format) with json_schema, not response_schema (400 Unknown parameter)
-        const { response_schema: responseSchema, ...openaiSafeParams } = otherParams;
+        const { response_schema: responseSchema, reasoning: reqReasoning, reasoning_effort: reqReasoningEffort, ...openaiSafeParams } = otherParams;
+        // Normalize reasoning for OpenAI Responses API: expects reasoning: { effort: "medium" }, not reasoning: true + reasoning_effort
+        const useReasoning = reqReasoning === true || (reqReasoning && typeof reqReasoning === 'object');
+        const reasoningObj = useReasoning
+          ? (typeof reqReasoning === 'object' && reqReasoning?.effort
+              ? reqReasoning
+              : { effort: reqReasoningEffort || 'medium' })
+          : undefined;
+        if (useReasoning && reasoningObj) {
+          console.log(`[AI-SERVICE] OpenAI reasoning: effort=${reasoningObj.effort || 'medium'}`);
+        }
         const existingText = openaiSafeParams.text || {};
         let textFormat = existingText.format;
         if (responseSchema && typeof responseSchema === 'object' && (responseSchema.type === 'object' || responseSchema.schema)) {
@@ -471,6 +481,7 @@ app.post('/api/ai/chat', async (req, res) => {
           input: requestInput,
           ...(!isGpt5 && temperature !== undefined && { temperature }),
           ...(effectiveMaxTokens !== undefined && { max_output_tokens: effectiveMaxTokens }),
+          ...(reasoningObj && { reasoning: reasoningObj }),
           ...openaiSafeParams,
           text: { ...existingText, format: textFormat }
         };
