@@ -183,15 +183,16 @@ app.use(async (req, res, next) => {
 
 // OpenAI pricing (as of 2024, in USD per 1M tokens)
 const pricing = {
-  'gpt-4': { input: 30.00, output: 60.00 },
-  'gpt-4-turbo': { input: 10.00, output: 30.00 },
-  'gpt-4o': { input: 5.00, output: 15.00 },
-  'gpt-4o-mini': { input: 0.150, output: 0.600 },
-  'gpt-5-mini': { input: 0.150, output: 0.600 },
-  'gpt-5-nano': { input: 0.150, output: 0.600 },
-  'gpt-3.5-turbo': { input: 0.50, output: 1.50 },
-  'o1-preview': { input: 15.00, output: 60.00 },
-  'o1-mini': { input: 3.00, output: 12.00 },
+  // Doubled rates for OpenAI models (commercial pricing adjustment).
+  'gpt-4': { input: 60.00, output: 120.00 },
+  'gpt-4-turbo': { input: 20.00, output: 60.00 },
+  'gpt-4o': { input: 10.00, output: 30.00 },
+  'gpt-4o-mini': { input: 0.300, output: 1.200 },
+  'gpt-5-mini': { input: 0.300, output: 1.200 },
+  'gpt-5-nano': { input: 0.300, output: 1.200 },
+  'gpt-3.5-turbo': { input: 1.00, output: 3.00 },
+  'o1-preview': { input: 30.00, output: 120.00 },
+  'o1-mini': { input: 6.00, output: 24.00 },
   'local-model': { input: 0, output: 0 } // Local models are free
 };
 
@@ -248,6 +249,34 @@ async function logToBackend(jobId, level, message, metadata = {}) {
     });
   } catch (error) {
     console.error(`[AI-SERVICE] Failed to log to backend:`, error.message);
+  }
+}
+
+/**
+ * Report AI usage to backend so it can be estimated and charged.
+ * This hits the backend's job AI metrics endpoint, which:
+ * - calculates cost using backend pricing (USD->AUD)
+ * - deducts from user balance when required
+ * - updates job AI metrics
+ */
+async function reportAiMetricsToBackend(jobId, { usage, model }) {
+  if (!jobId || !BACKEND_URL) {
+    return;
+  }
+  if (!usage || typeof usage !== 'object') {
+    return;
+  }
+  try {
+    await axios.post(`${BACKEND_URL}/jobs/${encodeURIComponent(jobId)}/ai-metrics`, {
+      usage,
+      model,
+      mode: AI_MODE
+    }, {
+      timeout: 5000
+    });
+  } catch (error) {
+    // Do not fail the AI call response if backend metering is unavailable.
+    console.warn('[AI-SERVICE] Failed to report ai-metrics to backend:', error.response?.data?.error || error.message);
   }
 }
 
@@ -593,6 +622,11 @@ app.post('/api/ai/chat', async (req, res) => {
           finish_reason: response.finish_reason || 'stop'
         }
       );
+    }
+
+    // Step 6b: Report usage to backend for project estimation + charging
+    if (requestJobId) {
+      await reportAiMetricsToBackend(requestJobId, { usage: response.usage, model: response.model });
     }
 
     console.log(`[AI-SERVICE] ✅ AI request completed - Job: ${requestJobId}, Duration: ${duration}ms, Tokens: ${costDetails.totalTokens}`);
