@@ -29,7 +29,8 @@ export async function checkEligibility(projectId, jobId, model, estimatedTokens 
       eligible: response.data.eligible === true,
       reason: response.data.reason || null,
       license_valid: response.data.license_valid,
-      funds_available: response.data.funds_available
+      funds_available: response.data.funds_available,
+      balance_aud: response.data.balance_aud != null ? Number(response.data.balance_aud) : null,
     };
   } catch (error) {
     console.error(`[ELIGIBILITY] Failed to check eligibility:`, error.message);

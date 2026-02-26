@@ -297,6 +297,10 @@ app.get('/health', (req, res) => {
  * Main AI request endpoint
  * Receives requests from crawlers and proxies to LLM
  */
+// When true, check AI token balance with backend before each OpenAI request and deny if balance <= 0.
+// Set only for the shared ai.aionqa.com deployment; leave unset for self-hosted / other AI services.
+const REQUIRE_AI_BALANCE_CHECK = /^(true|1|yes)$/i.test(process.env.REQUIRE_AI_BALANCE_CHECK || '');
+
 // Environment overrides: when set, take priority over request params (used by ai.aionqa.com)
 const ENV_OVERRIDE_MODEL = process.env.OPENAI_OVERRIDE_MODEL || process.env.OPENAI_DEFAULT_MODEL;
 const _envMax = process.env.OPENAI_OVERRIDE_MAX_OUTPUT_TOKENS;
@@ -344,11 +348,14 @@ app.post('/api/ai/chat', async (req, res) => {
   console.log(`[AI-SERVICE] Received AI request - Job: ${requestJobId}, Model: ${actualModel}, Mode: ${AI_MODE}`);
 
   try {
-    // Step 1: Check eligibility (license/funds)
-    if (requestProjectId && requestJobId) {
+    // Step 1: Check eligibility (license/funds) — only for shared ai.aionqa.com (REQUIRE_AI_BALANCE_CHECK)
+    if (REQUIRE_AI_BALANCE_CHECK && requestProjectId && requestJobId) {
       const eligibility = await checkEligibility(requestProjectId, requestJobId, model);
       if (!eligibility.eligible) {
-        const errorMsg = `Request not eligible: ${eligibility.reason || 'Unknown reason'}`;
+        const balanceAud = eligibility.balance_aud ?? 0;
+        const errorMsg = eligibility.reason === 'insufficient_funds'
+          ? `Insufficient AI token balance. Please top up to continue. (Balance: ${Number(balanceAud).toFixed(2)} AUD)`
+          : `Request not eligible: ${eligibility.reason || 'Unknown reason'}`;
         const reasonText = String(eligibility.reason || '').toLowerCase();
         const isTransientGatewayIssue =
           reasonText.includes('status code 502') ||
@@ -358,20 +365,21 @@ app.post('/api/ai/chat', async (req, res) => {
           reasonText.includes('gateway timeout');
         const logLevel = isTransientGatewayIssue ? 'warn' : 'error';
         console.warn(`[AI-SERVICE] ${errorMsg}`);
-        
+
         await logToBackend(requestJobId, logLevel, `${isTransientGatewayIssue ? '⚠️' : '❌'} ${errorMsg}`, {
           model,
           project_id: requestProjectId,
-          eligibility
+          eligibility,
         });
-        
-        return res.status(403).json({
+
+        const statusCode = eligibility.reason === 'insufficient_funds' ? 402 : 403;
+        return res.status(statusCode).json({
           error: {
             message: errorMsg,
             type: 'eligibility_error',
-            code: 'not_eligible',
-            eligibility
-          }
+            code: eligibility.reason === 'insufficient_funds' ? 'insufficient_funds' : 'not_eligible',
+            eligibility,
+          },
         });
       }
     }
