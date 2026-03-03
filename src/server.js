@@ -255,28 +255,31 @@ async function logToBackend(jobId, level, message, metadata = {}) {
 /**
  * Report AI usage to backend so it can be estimated and charged.
  * This hits the backend's job AI metrics endpoint, which:
- * - calculates cost using backend pricing (USD->AUD)
- * - deducts from user balance when required
+ * - calculates cost using admin-configured pricing (USD->AUD)
+ * - deducts from user balance when required (ai.aionqa.com only)
  * - updates job AI metrics
+ * @returns {Promise<{ usage?: { usd, aud }, deductedAud?: number, savedUsd?: number }|null>} Backend response or null
  */
 async function reportAiMetricsToBackend(jobId, { usage, model }) {
   if (!jobId || !BACKEND_URL) {
-    return;
+    return null;
   }
   if (!usage || typeof usage !== 'object') {
-    return;
+    return null;
   }
   try {
-    await axios.post(`${BACKEND_URL}/jobs/${encodeURIComponent(jobId)}/ai-metrics`, {
+    const { data } = await axios.post(`${BACKEND_URL}/jobs/${encodeURIComponent(jobId)}/ai-metrics`, {
       usage,
       model,
       mode: AI_MODE
     }, {
       timeout: 5000
     });
+    return data || null;
   } catch (error) {
     // Do not fail the AI call response if backend metering is unavailable.
     console.warn('[AI-SERVICE] Failed to report ai-metrics to backend:', error.response?.data?.error || error.message);
+    return null;
   }
 }
 
@@ -608,38 +611,44 @@ app.post('/api/ai/chat', async (req, res) => {
       throw error;
     }
 
-    // Step 5: Calculate cost
-    const costDetails = calculateCost(response.usage, response.model);
+    // Step 5: Report usage to backend first so we get the actual charged/saved cost (admin-configured pricing).
     const duration = Date.now() - startTime;
-
-    // Step 6: Log completion
+    let metricsResponse = null;
     if (requestJobId) {
-      const inputTokens = response.usage?.prompt_tokens ?? response.usage?.input_tokens ?? 0;
-      const outputTokens = response.usage?.completion_tokens ?? response.usage?.output_tokens ?? 0;
-      const totalTokens = response.usage?.total_tokens ?? (inputTokens + outputTokens);
+      metricsResponse = await reportAiMetricsToBackend(requestJobId, { usage: response.usage, model: response.model });
+    }
 
-      await logToBackend(requestJobId, 'info', 
-        `✅ AI call completed in ${(duration / 1000).toFixed(2)}s - Input: ${inputTokens} tokens, Output: ${outputTokens} tokens, Total: ${totalTokens} tokens, Cost: $${costDetails.totalCost.toFixed(6)} USD`,
+    // Step 6: Log completion using backend-reported cost so job logs always show correct charge/saved amount.
+    const inputTokens = response.usage?.prompt_tokens ?? response.usage?.input_tokens ?? 0;
+    const outputTokens = response.usage?.completion_tokens ?? response.usage?.output_tokens ?? 0;
+    const totalTokens = response.usage?.total_tokens ?? (inputTokens + outputTokens);
+    const costUsd = metricsResponse?.usage?.usd;
+    const savedUsd = metricsResponse?.savedUsd;
+    const costForLog = costUsd != null ? costUsd : (savedUsd != null ? savedUsd : calculateCost(response.usage, response.model).totalCost);
+    const costText = savedUsd != null && savedUsd > 0
+      ? `Saved $${Number(savedUsd).toFixed(6)} USD (self-deployed, not charged)`
+      : `Cost: $${Number(costForLog).toFixed(6)} USD`;
+
+    if (requestJobId) {
+      await logToBackend(requestJobId, 'info',
+        `✅ AI call completed in ${(duration / 1000).toFixed(2)}s - Input: ${inputTokens} tokens, Output: ${outputTokens} tokens, Total: ${totalTokens} tokens, ${costText}`,
         {
           model: response.model,
           mode: AI_MODE,
           duration_ms: duration,
           usage: response.usage,
-          cost: costDetails,
+          cost: { totalCost: costForLog, currency: 'USD' },
           status: 'completed',
-          finish_reason: response.finish_reason || 'stop'
+          finish_reason: response.finish_reason || 'stop',
+          cost_usd: costUsd,
+          saved_usd: savedUsd,
         }
       );
     }
 
-    // Step 6b: Report usage to backend for project estimation + charging
-    if (requestJobId) {
-      await reportAiMetricsToBackend(requestJobId, { usage: response.usage, model: response.model });
-    }
+    console.log(`[AI-SERVICE] ✅ AI request completed - Job: ${requestJobId}, Duration: ${duration}ms, Tokens: ${totalTokens}`);
 
-    console.log(`[AI-SERVICE] ✅ AI request completed - Job: ${requestJobId}, Duration: ${duration}ms, Tokens: ${costDetails.totalTokens}`);
-
-    // Step 7: Return response in OpenAI format (normalize content to string for LM Studio array content)
+    // Step 7: Return response in OpenAI format; include cost_usd so crawlers can log accurate cost.
     const outText = typeof response.output_text === 'string' ? response.output_text : contentToString(response.choices?.[0]?.message?.content);
     res.json({
       id: response.id,
@@ -648,7 +657,9 @@ app.post('/api/ai/chat', async (req, res) => {
       output: response.output?.length ? response.output : [{ type: 'output_text', text: outText || '' }],
       usage: response.usage,
       finish_reason: response.finish_reason || response.choices?.[0]?.finish_reason || 'stop',
-      status: response.status || 'completed'
+      status: response.status || 'completed',
+      ...(costUsd != null && { cost_usd: costUsd }),
+      ...(savedUsd != null && savedUsd > 0 && { saved_usd: savedUsd }),
     });
 
   } catch (error) {
