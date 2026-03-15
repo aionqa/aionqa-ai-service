@@ -369,7 +369,7 @@ app.post('/api/ai/chat', async (req, res) => {
         const logLevel = isTransientGatewayIssue ? 'warn' : 'error';
         console.warn(`[AI-SERVICE] ${errorMsg}`);
 
-        await logToBackend(requestJobId, logLevel, `${isTransientGatewayIssue ? '⚠️' : '❌'} ${errorMsg}`, {
+        await logToBackend(requestJobId, logLevel, `[AI] ${isTransientGatewayIssue ? '⚠️' : '❌'} ${errorMsg}`, {
           model,
           project_id: requestProjectId,
           eligibility,
@@ -389,7 +389,7 @@ app.post('/api/ai/chat', async (req, res) => {
 
     // Step 2: Log request start (use actualModel so logs show LM Studio/Ollama model when applicable)
     if (requestJobId) {
-      await logToBackend(requestJobId, 'info', `🤖 AI Request: Model: ${actualModel}, Mode: ${AI_MODE}`, {
+      await logToBackend(requestJobId, 'info', `[AI] 🤖 AI Request: Model: ${actualModel}, Mode: ${AI_MODE}`, {
         model: actualModel,
         project_id: requestProjectId,
         job_id: requestJobId,
@@ -596,7 +596,7 @@ app.post('/api/ai/chat', async (req, res) => {
       }
       if (requestJobId) {
         await logToBackend(requestJobId, 'error',
-          `❌ AI request failed: ${error.message}`,
+          `[AI] ❌ AI request failed: ${error.message}`,
           {
             model: actualModel,
             project_id: requestProjectId,
@@ -631,17 +631,16 @@ app.post('/api/ai/chat', async (req, res) => {
 
     if (requestJobId) {
       await logToBackend(requestJobId, 'info',
-        `✅ AI call completed in ${(duration / 1000).toFixed(2)}s - Input: ${inputTokens} tokens, Output: ${outputTokens} tokens, Total: ${totalTokens} tokens, ${costText}`,
+        `[AI] AI call completed [reporting service] - Duration: ${duration}ms, Tokens: ${totalTokens}, ${costText}`,
         {
           model: response.model,
+          project_id: requestProjectId,
           mode: AI_MODE,
           duration_ms: duration,
-          usage: response.usage,
-          cost: { totalCost: costForLog, currency: 'USD' },
-          status: 'completed',
-          finish_reason: response.finish_reason || 'stop',
-          cost_usd: costUsd,
-          saved_usd: savedUsd,
+          ...response.usage,
+          ...(costUsd != null && { cost_usd: costUsd }),
+          ...(savedUsd != null && savedUsd > 0 && { saved_usd: savedUsd }),
+          status: 'completed'
         }
       );
     }
@@ -669,7 +668,7 @@ app.post('/api/ai/chat', async (req, res) => {
     // Log error (use actualModel so job logs show correct model)
     if (requestJobId) {
       await logToBackend(requestJobId, 'error', 
-        `❌ AI request failed: ${error.message}`,
+        `[AI] ❌ AI request failed: ${error.message}`,
         {
           model: actualModel,
           project_id: requestProjectId,
