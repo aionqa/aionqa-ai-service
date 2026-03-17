@@ -535,6 +535,19 @@ app.post('/api/ai/chat', async (req, res) => {
           };
           console.log(`[AI-SERVICE] OpenAI request: using response_format (text.format) with json_schema`);
         }
+        // OpenAI mode: always use json_schema (Responses API); no chat completions; require structured output
+        if (AI_MODE === 'openai' && (!textFormat || textFormat.type !== 'json_schema')) {
+          const defaultSchema = { type: 'object', properties: { content: { type: 'string' } }, additionalProperties: false };
+          ensureStrictSchema(defaultSchema);
+          stripExtraRequired(defaultSchema);
+          textFormat = {
+            type: 'json_schema',
+            name: 'response',
+            schema: defaultSchema,
+            strict: true
+          };
+          console.log(`[AI-SERVICE] OpenAI mode: using default json_schema (required for Responses API)`);
+        }
         // When requiring JSON: prepend strict instruction so model returns JSON only (no markdown)
         let requestInput = inputArray;
         if (textFormat && (textFormat.type === 'json_schema' || textFormat.type === 'json_object')) {
