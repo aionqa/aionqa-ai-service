@@ -283,6 +283,29 @@ async function reportAiMetricsToBackend(jobId, { usage, model }) {
   }
 }
 
+function safeSerialize(value) {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value ?? '');
+  }
+}
+
+async function reportAIConversationToBackend(conversationData) {
+  if (!BACKEND_URL || !conversationData || !conversationData.job_id) {
+    return null;
+  }
+  try {
+    const { data } = await axios.post(`${BACKEND_URL}/ai-conversations`, conversationData, {
+      timeout: 8000
+    });
+    return data || null;
+  } catch (error) {
+    console.warn('[AI-SERVICE] Failed to report ai-conversation to backend:', error.response?.data?.error || error.message);
+    return null;
+  }
+}
+
 /**
  * Health check endpoint
  */
@@ -326,6 +349,7 @@ app.post('/api/ai/chat', async (req, res) => {
     temperature,
     max_tokens,
     max_output_tokens,
+    aionqa_conversation,
     ...otherParams
   } = req.body;
   // Environment overrides take priority over request params
@@ -340,6 +364,10 @@ app.post('/api/ai/chat', async (req, res) => {
   const tokenInfo = req.tokenInfo || {};
   const requestProjectId = project_id || tokenInfo.project_id;
   const requestJobId = job_id || tokenInfo.job_id;
+  const conversationMeta = (aionqa_conversation && typeof aionqa_conversation === 'object')
+    ? aionqa_conversation
+    : null;
+  const pendingConversationId = conversationMeta?.conversation_id || `ai-conv-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
   // Actual model used for this mode (so logs show LM Studio/Ollama model, not request's gpt-5-mini)
   const actualModel = AI_MODE === 'ollama'
@@ -395,6 +423,30 @@ app.post('/api/ai/chat', async (req, res) => {
         job_id: requestJobId,
         mode: AI_MODE,
         status: 'pending'
+      });
+    }
+
+    if (conversationMeta && requestJobId) {
+      await reportAIConversationToBackend({
+        job_id: requestJobId,
+        agent_name: conversationMeta.agent_name || 'ai-service',
+        conversation_type: conversationMeta.conversation_type || 'ai_call',
+        text_request: conversationMeta.text_request || '',
+        source_payload: conversationMeta.source_payload || {},
+        ai_response: null,
+        human_request: conversationMeta.human_request || null,
+        human_response: '⏳ Waiting for AI response...',
+        screenshot_id: conversationMeta.screenshot_id || null,
+        page_url: conversationMeta.page_url || null,
+        timestamp: new Date(),
+        status: 'pending',
+        conversation_id: pendingConversationId,
+        metadata: {
+          ...(conversationMeta.metadata || {}),
+          request_sent_at: new Date().toISOString(),
+          full_request: conversationMeta.full_request || null,
+          model: actualModel
+        }
       });
     }
 
@@ -662,6 +714,43 @@ app.post('/api/ai/chat', async (req, res) => {
 
     // Step 7: Return response in OpenAI format; include cost_usd so crawlers can log accurate cost.
     const outText = typeof response.output_text === 'string' ? response.output_text : contentToString(response.choices?.[0]?.message?.content);
+
+    if (conversationMeta && requestJobId) {
+      await reportAIConversationToBackend({
+        job_id: requestJobId,
+        agent_name: conversationMeta.agent_name || 'ai-service',
+        conversation_type: conversationMeta.conversation_type || 'ai_call',
+        text_request: conversationMeta.text_request || '',
+        source_payload: conversationMeta.source_payload || {},
+        ai_response: {
+          output_text: outText || '',
+          output: response.output,
+          usage: response.usage,
+          model: response.model
+        },
+        human_request: conversationMeta.human_request || null,
+        human_response: conversationMeta.human_response || null,
+        screenshot_id: conversationMeta.screenshot_id || null,
+        page_url: conversationMeta.page_url || null,
+        timestamp: new Date(),
+        status: 'success',
+        usage: response.usage || null,
+        cost: costUsd != null ? { totalCost: Number(costUsd), currency: 'USD' } : null,
+        conversation_id: pendingConversationId,
+        metadata: {
+          ...(conversationMeta.metadata || {}),
+          model: response.model || actualModel,
+          full_request: conversationMeta.full_request || null,
+          full_response: safeSerialize({
+            output_text: outText || '',
+            output: response.output,
+            usage: response.usage,
+            finish_reason: response.finish_reason || response.choices?.[0]?.finish_reason || 'stop'
+          })
+        }
+      });
+    }
+
     res.json({
       id: response.id,
       model: response.model,
@@ -692,6 +781,30 @@ app.post('/api/ai/chat', async (req, res) => {
           status: 'failed'
         }
       );
+    }
+
+    if (conversationMeta && requestJobId) {
+      await reportAIConversationToBackend({
+        job_id: requestJobId,
+        agent_name: conversationMeta.agent_name || 'ai-service',
+        conversation_type: conversationMeta.conversation_type || 'ai_call',
+        text_request: conversationMeta.text_request || '',
+        source_payload: conversationMeta.source_payload || {},
+        ai_response: null,
+        human_request: conversationMeta.human_request || null,
+        human_response: `❌ Failed: ${error.message}`,
+        screenshot_id: conversationMeta.screenshot_id || null,
+        page_url: conversationMeta.page_url || null,
+        timestamp: new Date(),
+        status: 'failed',
+        error: error.message,
+        conversation_id: pendingConversationId,
+        metadata: {
+          ...(conversationMeta.metadata || {}),
+          model: actualModel,
+          full_request: conversationMeta.full_request || null
+        }
+      });
     }
 
     // Return error in OpenAI-like format
