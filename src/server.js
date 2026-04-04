@@ -575,6 +575,7 @@ app.post('/api/ai/chat', async (req, res) => {
         }
         const existingText = openaiSafeParams.text || {};
         let textFormat = existingText.format;
+        const hasTools = Array.isArray(openaiSafeParams.tools) && openaiSafeParams.tools.length > 0;
         if (responseSchema && typeof responseSchema === 'object' && (responseSchema.type === 'object' || responseSchema.schema)) {
           const rawSchema = JSON.parse(JSON.stringify(responseSchema.schema || responseSchema));
           ensureStrictSchema(rawSchema);
@@ -587,8 +588,13 @@ app.post('/api/ai/chat', async (req, res) => {
           };
           console.log(`[AI-SERVICE] OpenAI request: using response_format (text.format) with json_schema`);
         }
+        // Tool calling needs free-form output (function_call items), not locked JSON text
+        if (hasTools) {
+          textFormat = { type: 'text' };
+          console.log(`[AI-SERVICE] OpenAI request: tools present — using text format (no default json_schema)`);
+        }
         // OpenAI mode: always use json_schema (Responses API); no chat completions; require structured output
-        if (AI_MODE === 'openai' && (!textFormat || textFormat.type !== 'json_schema')) {
+        if (AI_MODE === 'openai' && !hasTools && (!textFormat || textFormat.type !== 'json_schema')) {
           const defaultSchema = { type: 'object', properties: { content: { type: 'string' } }, additionalProperties: false };
           ensureStrictSchema(defaultSchema);
           stripExtraRequired(defaultSchema);
@@ -602,7 +608,7 @@ app.post('/api/ai/chat', async (req, res) => {
         }
         // When requiring JSON: prepend strict instruction so model returns JSON only (no markdown)
         let requestInput = inputArray;
-        if (textFormat && (textFormat.type === 'json_schema' || textFormat.type === 'json_object')) {
+        if (!hasTools && textFormat && (textFormat.type === 'json_schema' || textFormat.type === 'json_object')) {
           const jsonOnlyPrefix = 'Respond with valid JSON only. No markdown, no code blocks.\n\n';
           let prepended = false;
           requestInput = inputArray.map((item) => {
