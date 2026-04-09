@@ -656,6 +656,8 @@ app.post('/api/ai/chat', async (req, res) => {
         // Never forward legacy Chat Completions keys to /v1/responses (400 if present)
         delete openaiRequest.response_format;
         delete openaiRequest.response_schema;
+        delete openaiRequest.max_completion_tokens;
+        delete openaiRequest.max_tokens;
         if (isGpt5) {
           console.log(`[AI-SERVICE] GPT-5 model: using max_output_tokens, omitting temperature`);
         }
