@@ -349,6 +349,8 @@ app.post('/api/ai/chat', async (req, res) => {
     temperature,
     max_tokens,
     max_output_tokens,
+    // Chat Completions legacy name; must not be forwarded to /v1/responses (use max_output_tokens only)
+    max_completion_tokens,
     aionqa_conversation,
     ...otherParams
   } = req.body;
@@ -356,7 +358,11 @@ app.post('/api/ai/chat', async (req, res) => {
   const model = ENV_OVERRIDE_MODEL || reqModel;
   const effectiveMaxTokens = ENV_OVERRIDE_MAX_OUTPUT_TOKENS != null
     ? ENV_OVERRIDE_MAX_OUTPUT_TOKENS
-    : (max_tokens !== undefined ? max_tokens : (max_output_tokens !== undefined ? max_output_tokens : 128000));
+    : (max_tokens !== undefined
+      ? max_tokens
+      : (max_output_tokens !== undefined
+        ? max_output_tokens
+        : (max_completion_tokens !== undefined ? max_completion_tokens : 128000)));
 
   // LM Studio / Ollama: do not send model in request; server uses its loaded/default model (per public API usage).
 
@@ -549,6 +555,7 @@ app.post('/api/ai/chat', async (req, res) => {
         const {
           response_schema: responseSchema,
           response_format: responseFormatLegacy,
+          max_completion_tokens: _legacyMaxCompletionDropped,
           reasoning: reqReasoning,
           reasoning_effort: reqReasoningEffort,
           ...openaiSafeParams
