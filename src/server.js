@@ -545,7 +545,14 @@ app.post('/api/ai/chat', async (req, res) => {
         response = convertChatToResponses(response);
       } else {
         // OpenAI and OpenAI-compatible: use response_format (text.format) with json_schema, not response_schema (400 Unknown parameter)
-        const { response_schema: responseSchema, reasoning: reqReasoning, reasoning_effort: reqReasoningEffort, ...openaiSafeParams } = otherParams;
+        // Legacy Chat Completions `response_format` must not be forwarded to Responses API (400: use text.format instead).
+        const {
+          response_schema: responseSchema,
+          response_format: responseFormatLegacy,
+          reasoning: reqReasoning,
+          reasoning_effort: reqReasoningEffort,
+          ...openaiSafeParams
+        } = otherParams;
         // Environment override for reasoning takes priority
         let reasoningObj;
         if (ENV_OVERRIDE_REASONING === false) {
@@ -576,6 +583,10 @@ app.post('/api/ai/chat', async (req, res) => {
         const existingText = openaiSafeParams.text || {};
         let textFormat = existingText.format;
         const hasTools = Array.isArray(openaiSafeParams.tools) && openaiSafeParams.tools.length > 0;
+        if (!textFormat && responseFormatLegacy && responseFormatLegacy.type === 'json_object') {
+          textFormat = { type: 'json_object' };
+          console.log('[AI-SERVICE] Mapped legacy response_format json_object to text.format (Responses API)');
+        }
         if (responseSchema && typeof responseSchema === 'object' && (responseSchema.type === 'object' || responseSchema.schema)) {
           const rawSchema = JSON.parse(JSON.stringify(responseSchema.schema || responseSchema));
           ensureStrictSchema(rawSchema);
@@ -594,7 +605,7 @@ app.post('/api/ai/chat', async (req, res) => {
           console.log(`[AI-SERVICE] OpenAI request: tools present — using text format (no default json_schema)`);
         }
         // OpenAI mode: always use json_schema (Responses API); no chat completions; require structured output
-        if (AI_MODE === 'openai' && !hasTools && (!textFormat || textFormat.type !== 'json_schema')) {
+        if (AI_MODE === 'openai' && !hasTools && (!textFormat || (textFormat.type !== 'json_schema' && textFormat.type !== 'json_object'))) {
           const defaultSchema = { type: 'object', properties: { content: { type: 'string' } }, additionalProperties: false };
           ensureStrictSchema(defaultSchema);
           stripExtraRequired(defaultSchema);
