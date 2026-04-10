@@ -7,52 +7,76 @@ import axios from 'axios';
 
 const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
 
+/** Match crawler OpenAI client: ALB/upstream blips before failing closed. */
+const TRANSIENT_ELIGIBILITY_HTTP = new Set([408, 429, 502, 503, 504]);
+const MAX_ELIGIBILITY_ATTEMPTS = 3;
+
+function isTransientEligibilityHttpError(error) {
+  const st = error?.response?.status;
+  return st != null && TRANSIENT_ELIGIBILITY_HTTP.has(Number(st));
+}
+
 /**
  * Check if request is eligible to be processed
  */
 export async function checkEligibility(projectId, jobId, model, estimatedTokens = null) {
-  try {
-    const response = await axios.post(
-      `${BACKEND_URL}/api/ai/check-eligibility`,
-      {
-        project_id: projectId,
-        job_id: jobId,
-        model: model,
-        estimated_tokens: estimatedTokens
-      },
-      {
-        timeout: 5000
-      }
-    );
-    
-    return {
-      eligible: response.data.eligible === true,
-      reason: response.data.reason || null,
-      license_valid: response.data.license_valid,
-      funds_available: response.data.funds_available,
-      balance_aud: response.data.balance_aud != null ? Number(response.data.balance_aud) : null,
-    };
-  } catch (error) {
-    console.error(`[ELIGIBILITY] Failed to check eligibility:`, error.message);
-    
-    // If backend is unavailable, allow request (fail open for availability)
-    // But log the error
-    if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') {
-      console.warn(`[ELIGIBILITY] Backend unavailable, allowing request (fail open)`);
+  let lastError;
+  for (let attempt = 0; attempt < MAX_ELIGIBILITY_ATTEMPTS; attempt++) {
+    try {
+      const response = await axios.post(
+        `${BACKEND_URL}/api/ai/check-eligibility`,
+        {
+          project_id: projectId,
+          job_id: jobId,
+          model: model,
+          estimated_tokens: estimatedTokens
+        },
+        {
+          timeout: 5000
+        }
+      );
+
       return {
-        eligible: true,
-        reason: 'backend_unavailable',
-        license_valid: null,
-        funds_available: null
+        eligible: response.data.eligible === true,
+        reason: response.data.reason || null,
+        license_valid: response.data.license_valid,
+        funds_available: response.data.funds_available,
+        balance_aud: response.data.balance_aud != null ? Number(response.data.balance_aud) : null,
       };
+    } catch (error) {
+      lastError = error;
+      if (isTransientEligibilityHttpError(error) && attempt < MAX_ELIGIBILITY_ATTEMPTS - 1) {
+        const delayMs = Math.min(8000, 500 * 2 ** attempt);
+        const st = error.response?.status ?? '?';
+        console.warn(
+          `[ELIGIBILITY] Transient HTTP ${st} from check-eligibility; retry ${attempt + 1}/${MAX_ELIGIBILITY_ATTEMPTS - 1} in ${delayMs}ms...`
+        );
+        await new Promise((r) => setTimeout(r, delayMs));
+        continue;
+      }
+      break;
     }
-    
-    // For other errors, deny request (fail closed for security)
+  }
+
+  const error = lastError;
+  console.error(`[ELIGIBILITY] Failed to check eligibility:`, error?.message);
+
+  // If backend is unavailable, allow request (fail open for availability)
+  if (error?.code === 'ECONNREFUSED' || error?.code === 'ETIMEDOUT') {
+    console.warn(`[ELIGIBILITY] Backend unavailable, allowing request (fail open)`);
     return {
-      eligible: false,
-      reason: error.response?.data?.error || error.message,
-      license_valid: false,
-      funds_available: false
+      eligible: true,
+      reason: 'backend_unavailable',
+      license_valid: null,
+      funds_available: null
     };
   }
+
+  // For other errors, deny request (fail closed for security)
+  return {
+    eligible: false,
+    reason: error?.response?.data?.error || error?.message,
+    license_valid: false,
+    funds_available: false
+  };
 }
