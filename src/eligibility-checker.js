@@ -11,9 +11,19 @@ const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
 const TRANSIENT_ELIGIBILITY_HTTP = new Set([408, 429, 502, 503, 504]);
 const MAX_ELIGIBILITY_ATTEMPTS = 3;
 
+const parsedEligibilityTimeout = parseInt(process.env.AI_ELIGIBILITY_CHECK_TIMEOUT_MS || '', 10);
+const ELIGIBILITY_TIMEOUT_MS = Number.isFinite(parsedEligibilityTimeout) && parsedEligibilityTimeout >= 3000
+  ? Math.min(120000, parsedEligibilityTimeout)
+  : 20000;
+
 function isTransientEligibilityHttpError(error) {
   const st = error?.response?.status;
   return st != null && TRANSIENT_ELIGIBILITY_HTTP.has(Number(st));
+}
+
+function isTransientEligibilityNetworkError(error) {
+  const code = error?.code;
+  return code === 'ECONNABORTED' || code === 'ETIMEDOUT';
 }
 
 /**
@@ -32,7 +42,7 @@ export async function checkEligibility(projectId, jobId, model, estimatedTokens 
           estimated_tokens: estimatedTokens
         },
         {
-          timeout: 5000
+          timeout: ELIGIBILITY_TIMEOUT_MS
         }
       );
 
@@ -45,11 +55,14 @@ export async function checkEligibility(projectId, jobId, model, estimatedTokens 
       };
     } catch (error) {
       lastError = error;
-      if (isTransientEligibilityHttpError(error) && attempt < MAX_ELIGIBILITY_ATTEMPTS - 1) {
+      const retryable =
+        (isTransientEligibilityHttpError(error) || isTransientEligibilityNetworkError(error))
+        && attempt < MAX_ELIGIBILITY_ATTEMPTS - 1;
+      if (retryable) {
         const delayMs = Math.min(8000, 500 * 2 ** attempt);
-        const st = error.response?.status ?? '?';
+        const st = error.response?.status ?? error?.code ?? '?';
         console.warn(
-          `[ELIGIBILITY] Transient HTTP ${st} from check-eligibility; retry ${attempt + 1}/${MAX_ELIGIBILITY_ATTEMPTS - 1} in ${delayMs}ms...`
+          `[ELIGIBILITY] Transient eligibility error (${st}); retry ${attempt + 1}/${MAX_ELIGIBILITY_ATTEMPTS - 1} in ${delayMs}ms...`
         );
         await new Promise((r) => setTimeout(r, delayMs));
         continue;
