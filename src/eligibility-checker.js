@@ -9,7 +9,8 @@ const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
 
 /** Match crawler OpenAI client: ALB/upstream blips before failing closed. */
 const TRANSIENT_ELIGIBILITY_HTTP = new Set([408, 429, 502, 503, 504]);
-const MAX_ELIGIBILITY_ATTEMPTS = 3;
+/** Rolling deploys / ALB target drains can surface 502 longer than a couple of quick retries. */
+const MAX_ELIGIBILITY_ATTEMPTS = 6;
 
 const parsedEligibilityTimeout = parseInt(process.env.AI_ELIGIBILITY_CHECK_TIMEOUT_MS || '', 10);
 const ELIGIBILITY_TIMEOUT_MS = Number.isFinite(parsedEligibilityTimeout) && parsedEligibilityTimeout >= 3000
@@ -59,7 +60,7 @@ export async function checkEligibility(projectId, jobId, model, estimatedTokens 
         (isTransientEligibilityHttpError(error) || isTransientEligibilityNetworkError(error))
         && attempt < MAX_ELIGIBILITY_ATTEMPTS - 1;
       if (retryable) {
-        const delayMs = Math.min(8000, 500 * 2 ** attempt);
+        const delayMs = Math.min(16000, 600 * 2 ** attempt);
         const st = error.response?.status ?? error?.code ?? '?';
         console.warn(
           `[ELIGIBILITY] Transient eligibility error (${st}); retry ${attempt + 1}/${MAX_ELIGIBILITY_ATTEMPTS - 1} in ${delayMs}ms...`
@@ -80,6 +81,21 @@ export async function checkEligibility(projectId, jobId, model, estimatedTokens 
     return {
       eligible: true,
       reason: 'backend_unavailable',
+      license_valid: null,
+      funds_available: null
+    };
+  }
+
+  // Upstream gateway errors after all retries: same class of unavailability as connection failures
+  // during ECS/ALB rollouts (observed as 502 on /api/ai/check-eligibility).
+  const gatewayStatus = error?.response?.status != null ? Number(error.response.status) : null;
+  if (gatewayStatus === 502 || gatewayStatus === 503 || gatewayStatus === 504) {
+    console.warn(
+      `[ELIGIBILITY] Gateway/status ${gatewayStatus} from backend after ${MAX_ELIGIBILITY_ATTEMPTS} attempts; allowing request (fail-open for deploy blips)`
+    );
+    return {
+      eligible: true,
+      reason: 'eligibility_gateway_transient',
       license_valid: null,
       funds_available: null
     };
