@@ -70,7 +70,14 @@ jobs:
       - name: Notify admin-api to update shared helpers' AI service containers
         if: success()
         run: |
-          curl -fsS -X POST "https://admin-api.aionqa.com/api/admin/docker-engines/notify-new-image" \
-            -H "Content-Type: application/json" \
-            -d '{"image":"aionqa-ai-service"}'
-          echo "✅ Notified admin-api (shared helpers will queue 'update' for aionqa-ai-service)."
+          for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+            if curl -fsS -X POST "https://admin-api.aionqa.com/api/admin/docker-engines/notify-new-image" \
+              -H "Content-Type: application/json" \
+              -d '{"image":"aionqa-ai-service"}'; then
+              echo "✅ Notified admin-api (shared helpers will queue 'update' for aionqa-ai-service)."
+              exit 0
+            fi
+            echo "notify attempt $i failed; retry in 20s..."
+            sleep 20
+          done
+          exit 1
