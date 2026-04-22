@@ -15,6 +15,7 @@
 import express from 'express';
 import cors from 'cors';
 import axios from 'axios';
+import { setAiJobLogBackendUrl, queueAiServiceJobLog, flushAiJobLogBuffers } from './job-ai-log-buffer.js';
 import { createLLMClient } from './llm-providers.js';
 import { checkEligibility } from './eligibility-checker.js';
 import { validateAIServiceToken } from './token-validator.js';
@@ -22,6 +23,7 @@ import { validateAIServiceToken } from './token-validator.js';
 const app = express();
 const PORT = process.env.PORT || 5000;
 const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
+setAiJobLogBackendUrl(BACKEND_URL);
 
 // Version info for image update verification
 const SERVICE_VERSION = process.env.SERVICE_VERSION || process.env.IMAGE_TAG || 'unknown';
@@ -230,26 +232,11 @@ function calculateCost(usage, model) {
 }
 
 /**
- * Log AI request to backend
+ * Queue AI-SERVICE job log lines; batched to POST /api/logs/jobs/append-ai (see job-ai-log-buffer.js).
  */
-async function logToBackend(jobId, level, message, metadata = {}) {
-  if (!jobId || !BACKEND_URL) {
-    return;
-  }
-  
-  try {
-    await axios.post(`${BACKEND_URL}/api/logs/jobs/append`, {
-      jobId,
-      level,
-      message,
-      component: 'AI-SERVICE',
-      metadata
-    }, {
-      timeout: 5000
-    });
-  } catch (error) {
-    console.error(`[AI-SERVICE] Failed to log to backend:`, error.message);
-  }
+function logToBackend(jobId, level, message, metadata = {}) {
+  if (!jobId || !BACKEND_URL) return;
+  queueAiServiceJobLog(jobId, level, message, metadata);
 }
 
 /**
@@ -929,6 +916,12 @@ function convertChatToResponses(chatResponse) {
     finish_reason: choice?.finish_reason || 'stop',
     status: 'completed'
   };
+}
+
+for (const sig of ['SIGTERM', 'SIGINT']) {
+  process.on(sig, () => {
+    flushAiJobLogBuffers().catch(() => {});
+  });
 }
 
 // Start server
