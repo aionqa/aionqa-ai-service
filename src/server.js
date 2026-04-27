@@ -28,6 +28,36 @@ import {
   startOpenAiOverridePolling,
 } from './openaiOverrides.js';
 
+/**
+ * When OPENAI_DISABLE_WEB_SEARCH is not explicitly false, strip web search / browsing
+ * from the Responses API payload so upstream cannot enable browsing by default.
+ * Set OPENAI_DISABLE_WEB_SEARCH=false to allow (e.g. local debugging).
+ */
+function stripOpenAiWebSearchUnlessAllowed(openaiSafeParams) {
+  const allowWeb = /^(false|0|no)$/i.test(String(process.env.OPENAI_DISABLE_WEB_SEARCH || '').trim());
+  if (allowWeb) return;
+  if (openaiSafeParams.web_search) {
+    delete openaiSafeParams.web_search;
+    console.log('[AI-SERVICE] Removed web_search (set OPENAI_DISABLE_WEB_SEARCH=false to allow)');
+  }
+  if (Array.isArray(openaiSafeParams.tools)) {
+    const before = openaiSafeParams.tools.length;
+    const filtered = openaiSafeParams.tools.filter((t) => {
+      const typ = t && (t.type != null ? t.type : t.name);
+      const s = String(typ || '').toLowerCase();
+      return !s.includes('web_search') && !s.includes('browsing') && !s.includes('websearch');
+    });
+    if (filtered.length !== before) {
+      console.log(`[AI-SERVICE] Removed ${before - filtered.length} web/browsing tool(s) from tools array`);
+    }
+    if (filtered.length > 0) {
+      openaiSafeParams.tools = filtered;
+    } else {
+      delete openaiSafeParams.tools;
+    }
+  }
+}
+
 const app = express();
 const PORT = process.env.PORT || 5000;
 const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
@@ -546,6 +576,7 @@ app.post('/api/ai/chat', async (req, res) => {
           reasoning_effort: reqReasoningEffort,
           ...openaiSafeParams
         } = otherParams;
+        stripOpenAiWebSearchUnlessAllowed(openaiSafeParams);
         // Secret/env override for reasoning takes priority
         const overrideRe = getEffectiveReasoningEnabledOverride(process.env);
         const overrideEff = getEffectiveReasoningEffortFromEnvOverride(process.env);
