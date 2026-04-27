@@ -19,6 +19,14 @@ import { setAiJobLogBackendUrl, queueAiServiceJobLog, flushAiJobLogBuffers } fro
 import { createLLMClient } from './llm-providers.js';
 import { checkEligibility } from './eligibility-checker.js';
 import { validateAIServiceToken } from './token-validator.js';
+import {
+  getEffectiveMaxOutputTokens,
+  getEffectiveModel,
+  getEffectiveReasoningEnabledOverride,
+  getEffectiveReasoningEffortFromEnvOverride,
+  refreshOpenAiOverridesFromSecret,
+  startOpenAiOverridePolling,
+} from './openaiOverrides.js';
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -191,6 +199,7 @@ const pricing = {
   'gpt-4o': { input: 10.00, output: 30.00 },
   'gpt-4o-mini': { input: 0.300, output: 1.200 },
   'gpt-5-mini': { input: 0.300, output: 1.200 },
+  'gpt-5.4-mini': { input: 0.300, output: 1.200 },
   'gpt-5-nano': { input: 0.300, output: 1.200 },
   'gpt-3.5-turbo': { input: 1.00, output: 3.00 },
   'o1-preview': { input: 30.00, output: 120.00 },
@@ -314,17 +323,6 @@ app.get('/health', (req, res) => {
 // Set only for the shared ai.aionqa.com deployment; leave unset for self-hosted / other AI services.
 const REQUIRE_AI_BALANCE_CHECK = /^(true|1|yes)$/i.test(process.env.REQUIRE_AI_BALANCE_CHECK || '');
 
-// Environment overrides: when set, take priority over request params (used by ai.aionqa.com)
-const ENV_OVERRIDE_MODEL = process.env.OPENAI_OVERRIDE_MODEL || process.env.OPENAI_DEFAULT_MODEL;
-const _envMax = process.env.OPENAI_OVERRIDE_MAX_OUTPUT_TOKENS;
-const ENV_OVERRIDE_MAX_OUTPUT_TOKENS = (_envMax != null && _envMax !== '') ? (parseInt(_envMax, 10) || null) : null;
-const ENV_OVERRIDE_REASONING = process.env.OPENAI_OVERRIDE_REASONING_ENABLED != null
-  ? /^(true|1|yes)$/i.test(process.env.OPENAI_OVERRIDE_REASONING_ENABLED)
-  : null; // null = not set, true/false = override
-if (ENV_OVERRIDE_MODEL || ENV_OVERRIDE_MAX_OUTPUT_TOKENS != null || ENV_OVERRIDE_REASONING !== null) {
-  console.log(`[AI-SERVICE] Environment overrides: model=${ENV_OVERRIDE_MODEL || 'none'}, max_output_tokens=${ENV_OVERRIDE_MAX_OUTPUT_TOKENS ?? 'none'}, reasoning_enabled=${ENV_OVERRIDE_REASONING}`);
-}
-
 app.post('/api/ai/chat', async (req, res) => {
   const startTime = Date.now();
   const {
@@ -341,10 +339,11 @@ app.post('/api/ai/chat', async (req, res) => {
     aionqa_conversation,
     ...otherParams
   } = req.body;
-  // Environment overrides take priority over request params
-  const model = ENV_OVERRIDE_MODEL || reqModel;
-  const effectiveMaxTokens = ENV_OVERRIDE_MAX_OUTPUT_TOKENS != null
-    ? ENV_OVERRIDE_MAX_OUTPUT_TOKENS
+  // Secrets / env overrides take priority over request params
+  const model = getEffectiveModel(process.env, reqModel);
+  const _cap = getEffectiveMaxOutputTokens(process.env);
+  const effectiveMaxTokens = _cap != null
+    ? _cap
     : (max_tokens !== undefined
       ? max_tokens
       : (max_output_tokens !== undefined
@@ -547,14 +546,19 @@ app.post('/api/ai/chat', async (req, res) => {
           reasoning_effort: reqReasoningEffort,
           ...openaiSafeParams
         } = otherParams;
-        // Environment override for reasoning takes priority
+        // Secret/env override for reasoning takes priority
+        const overrideRe = getEffectiveReasoningEnabledOverride(process.env);
+        const overrideEff = getEffectiveReasoningEffortFromEnvOverride(process.env);
         let reasoningObj;
-        if (ENV_OVERRIDE_REASONING === false) {
+        if (overrideRe === false) {
           // gpt-5-nano does not support 'none', use 'minimal' (lowest effort)
           reasoningObj = { effort: 'minimal' };
           console.log(`[AI-SERVICE] Reasoning minimized by environment override: effort=minimal`);
-        } else if (ENV_OVERRIDE_REASONING === true) {
-          reasoningObj = { effort: reqReasoningEffort || 'medium' };
+        } else if (overrideRe === true) {
+          const rawEff = overrideEff || reqReasoningEffort || 'medium';
+          const eff =
+            String(rawEff).toLowerCase() === 'none' ? 'minimal' : (rawEff || 'medium');
+          reasoningObj = { effort: eff };
           console.log(`[AI-SERVICE] Reasoning enabled by environment override: effort=${reasoningObj.effort}`);
         } else {
           // Normalize reasoning for OpenAI Responses API: expects reasoning: { effort: "medium" } or { effort: "none" }
@@ -924,19 +928,35 @@ for (const sig of ['SIGTERM', 'SIGINT']) {
   });
 }
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`🚀 AionQA AI Service running on port ${PORT}`);
-  console.log(`📡 Backend URL: ${BACKEND_URL}`);
-  console.log(`🤖 LLM Mode: ${LLM_DISPLAY_NAME}`);
-  console.log(`🔑 LLM configured: ${!!llmClient}`);
-  if (AI_MODE === 'openai') {
-    console.log(`   OpenAI API key: ${llmConfig.apiKey ? '✅ Configured' : '❌ Missing'}`);
-  } else if (AI_MODE === 'openai-compatible') {
-    console.log(`   Base URL: ${llmConfig.baseURL || 'Not configured'}`);
-  } else if (AI_MODE === 'lm-studio') {
-    console.log(`   ${LLM_DISPLAY_NAME} URL: ${llmConfig.url}`);
-  } else if (AI_MODE === 'ollama') {
-    console.log(`   Ollama URL: ${llmConfig.url}, model: ${process.env.OLLAMA_MODEL || 'llama3.2'}`);
+// Start server: prime OPENAI_* overrides from app-vars (no ECS env for these — not controlled by Terraform).
+async function start() {
+  const arn = String(process.env.APP_VARS_SECRET_ARN || "").trim();
+  const _pollMs = parseInt(String(process.env.AI_OVERRIDES_POLL_MS || "45000"), 10);
+  if (arn && AI_MODE === "openai") {
+    try {
+      await refreshOpenAiOverridesFromSecret(arn, process.env.AWS_REGION);
+      console.log(`[AI-SERVICE] OpenAI overrides loaded from app-vars secret`);
+    } catch (e) {
+      console.warn(`[AI-SERVICE] OpenAI overrides initial fetch failed:`, e?.message || e);
+    }
+    startOpenAiOverridePolling(arn, process.env.AWS_REGION, Number.isFinite(_pollMs) && _pollMs > 0 ? _pollMs : 45000);
+    console.log(`[AI-SERVICE] OpenAI override polling enabled (every ${_pollMs}ms)`);
   }
-});
+  app.listen(PORT, () => {
+    console.log(`🚀 AionQA AI Service running on port ${PORT}`);
+    console.log(`📡 Backend URL: ${BACKEND_URL}`);
+    console.log(`🤖 LLM Mode: ${LLM_DISPLAY_NAME}`);
+    console.log(`🔑 LLM configured: ${!!llmClient}`);
+    if (AI_MODE === "openai") {
+      console.log(`   OpenAI API key: ${llmConfig.apiKey ? "✅ Configured" : "❌ Missing"}`);
+    } else if (AI_MODE === "openai-compatible") {
+      console.log(`   Base URL: ${llmConfig.baseURL || "Not configured"}`);
+    } else if (AI_MODE === "lm-studio") {
+      console.log(`   ${LLM_DISPLAY_NAME} URL: ${llmConfig.url}`);
+    } else if (AI_MODE === "ollama") {
+      console.log(`   Ollama URL: ${llmConfig.url}, model: ${process.env.OLLAMA_MODEL || "llama3.2"}`);
+    }
+  });
+}
+
+start();
