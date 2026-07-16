@@ -7,12 +7,14 @@ import OpenAI from 'openai';
 import axios from 'axios';
 
 /**
- * Create LLM client based on mode
+ * Create LLM client based on mode.
+ * For openai mode, config.apiKey (or OPENAI_API_KEY) is required unless allowMissingApiKey is true
+ * (shared ai.aionqa.com starts without a platform key and uses per-request BYOK).
  */
-export function createLLMClient(mode, config) {
+export function createLLMClient(mode, config = {}, options = {}) {
   switch (mode) {
     case 'openai':
-      return createOpenAIClient(config);
+      return createOpenAIClient(config, options);
     case 'openai-compatible':
       return createOpenAICompatibleClient(config);
     case 'lm-studio':
@@ -27,10 +29,13 @@ export function createLLMClient(mode, config) {
 /**
  * OpenAI client (direct OpenAI API)
  */
-function createOpenAIClient(config) {
+function createOpenAIClient(config, options = {}) {
   const apiKey = config.apiKey || process.env.OPENAI_API_KEY;
   if (!apiKey) {
-    throw new Error('OPENAI_API_KEY is required for OpenAI mode');
+    if (options.allowMissingApiKey) {
+      return null;
+    }
+    throw new Error('OPENAI_API_KEY is required for OpenAI mode (set env for self-hosted AI, or pass openai_api_key per request)');
   }
   
   return new OpenAI({

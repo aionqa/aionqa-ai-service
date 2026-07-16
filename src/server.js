@@ -72,17 +72,71 @@ console.log(`[AI-SERVICE] 📅 Build Date: ${BUILD_DATE}`);
 // LLM Mode configuration
 const AI_MODE = process.env.AI_MODE || 'openai'; // openai, openai-compatible, lm-studio, ollama
 const AI_SERVICE_TOKEN = process.env.AI_SERVICE_TOKEN; // Optional: for direct access (helpers)
+// Shared ai.aionqa.com: require callers to send their own OpenAI key (no platform shared key).
+const REQUIRE_CLIENT_OPENAI_KEY = /^(true|1|yes)$/i.test(String(process.env.REQUIRE_CLIENT_OPENAI_KEY || '').trim());
 
 // LLM Configuration based on mode
 const llmConfig = {
   mode: AI_MODE,
-  apiKey: process.env.OPENAI_API_KEY || process.env.LM_STUDIO_API_KEY || null,
+  // When REQUIRE_CLIENT_OPENAI_KEY is set, ignore any env key so a leaked/shared secret cannot be used.
+  apiKey: REQUIRE_CLIENT_OPENAI_KEY
+    ? null
+    : (process.env.OPENAI_API_KEY || process.env.LM_STUDIO_API_KEY || null),
   baseURL: process.env.LLM_BASE_URL,
   url: process.env.OLLAMA_URL || process.env.LM_STUDIO_URL || (AI_MODE === 'ollama' ? 'http://localhost:11434' : 'http://localhost:1234')
 };
 
 // Display name for logs
 const LLM_DISPLAY_NAME = AI_MODE === 'ollama' ? 'Ollama' : (AI_MODE === 'lm-studio' ? 'LM Studio' : AI_MODE);
+
+function extractClientOpenAiKey(req) {
+  const bodyKey = req?.body?.openai_api_key;
+  if (typeof bodyKey === 'string' && bodyKey.trim()) return bodyKey.trim();
+  const headerKey = req?.headers?.['x-openai-api-key'];
+  if (typeof headerKey === 'string' && headerKey.trim()) return headerKey.trim();
+  return null;
+}
+
+/**
+ * Resolve OpenAI client for this request.
+ * - REQUIRE_CLIENT_OPENAI_KEY / ai.aionqa.com: only the caller's key (BYOK)
+ * - Self-hosted AI container: env key, optionally overridden by request key
+ */
+function getLlmClientForRequest(req) {
+  if (AI_MODE !== 'openai' && AI_MODE !== 'openai-compatible') {
+    if (!llmClient) {
+      const err = new Error(`LLM client not configured for mode ${AI_MODE}`);
+      err.statusCode = 503;
+      err.code = 'llm_not_configured';
+      throw err;
+    }
+    return llmClient;
+  }
+  const clientKey = extractClientOpenAiKey(req);
+  if (REQUIRE_CLIENT_OPENAI_KEY) {
+    if (!clientKey) {
+      const err = new Error(
+        'openai_api_key is required. Set your OpenAI API key in project/helper configuration, or deploy your own AI service.'
+      );
+      err.statusCode = 401;
+      err.code = 'openai_api_key_required';
+      throw err;
+    }
+    return createLLMClient(AI_MODE, { ...llmConfig, apiKey: clientKey });
+  }
+  if (clientKey) {
+    return createLLMClient(AI_MODE, { ...llmConfig, apiKey: clientKey });
+  }
+  if (!llmClient) {
+    const err = new Error(
+      'openai_api_key is required. Set your OpenAI API key in project/helper configuration, or deploy your own AI service.'
+    );
+    err.statusCode = 401;
+    err.code = 'openai_api_key_required';
+    throw err;
+  }
+  return llmClient;
+}
 
 /**
  * Ensure every object in a JSON schema is valid for OpenAI strict mode:
@@ -154,17 +208,25 @@ function stripExtraRequired(schema) {
   }
 }
 
-// Initialize LLM client
+// Initialize LLM client (OpenAI may start without a shared key — BYOK per request).
 let llmClient = null;
 try {
-  llmClient = createLLMClient(AI_MODE, llmConfig);
-  console.log(`✅ LLM client initialized in ${LLM_DISPLAY_NAME} mode`);
+  llmClient = createLLMClient(AI_MODE, llmConfig, {
+    allowMissingApiKey: AI_MODE === 'openai' || AI_MODE === 'openai-compatible'
+  });
+  if (llmClient) {
+    console.log(`✅ LLM client initialized in ${LLM_DISPLAY_NAME} mode`);
+  } else if (AI_MODE === 'openai' || AI_MODE === 'openai-compatible') {
+    console.log(
+      `✅ ${LLM_DISPLAY_NAME} mode ready (BYOK): no shared OPENAI_API_KEY; callers must send openai_api_key`
+    );
+  }
 } catch (error) {
   console.error(`❌ Failed to initialize LLM client:`, error.message);
-  if (AI_MODE === 'openai' && !llmConfig.apiKey) {
-    console.error('❌ OPENAI_API_KEY is required for OpenAI mode');
+  if (AI_MODE !== 'openai' && AI_MODE !== 'openai-compatible') {
     process.exit(1);
   }
+  console.warn(`⚠️ Continuing without default LLM client; per-request openai_api_key required`);
 }
 
 // Middleware
@@ -340,7 +402,10 @@ app.get('/health', (req, res) => {
     status: 'ok',
     service: 'aionqa-ai-service',
     mode: AI_MODE,
-    llm_configured: !!llmClient,
+    // True when a default env key exists OR BYOK is enabled (service can still serve requests with client keys).
+    llm_configured: !!llmClient || REQUIRE_CLIENT_OPENAI_KEY || AI_MODE === 'openai' || AI_MODE === 'openai-compatible',
+    require_client_openai_key: REQUIRE_CLIENT_OPENAI_KEY,
+    shared_openai_key_configured: Boolean(llmConfig.apiKey),
     backend_url: BACKEND_URL
   });
 });
@@ -367,6 +432,7 @@ app.post('/api/ai/chat', async (req, res) => {
     // Chat Completions legacy name; must not be forwarded to /v1/responses (use max_output_tokens only)
     max_completion_tokens,
     aionqa_conversation,
+    openai_api_key: _requestOpenAiKey, // BYOK — never forward to OpenAI as a model param
     ...otherParams
   } = req.body;
   // Secrets / env overrides take priority over request params
@@ -399,6 +465,28 @@ app.post('/api/ai/chat', async (req, res) => {
       : model;
 
   console.log(`[AI-SERVICE] Received AI request - Job: ${requestJobId}, Model: ${actualModel}, Mode: ${AI_MODE}`);
+
+  let activeLlmClient;
+  try {
+    activeLlmClient = getLlmClientForRequest(req);
+  } catch (clientErr) {
+    const statusCode = clientErr.statusCode || 401;
+    console.warn(`[AI-SERVICE] ${clientErr.message}`);
+    if (requestJobId) {
+      await logToBackend(requestJobId, 'error', `[AI] ❌ ${clientErr.message}`, {
+        model: actualModel,
+        project_id: requestProjectId,
+        code: clientErr.code || 'openai_api_key_required'
+      });
+    }
+    return res.status(statusCode).json({
+      error: {
+        message: clientErr.message,
+        type: 'authentication_error',
+        code: clientErr.code || 'openai_api_key_required'
+      }
+    });
+  }
 
   try {
     // Step 1: Check eligibility (license/funds) — only for shared ai.aionqa.com (REQUIRE_AI_BALANCE_CHECK)
@@ -530,7 +618,7 @@ app.post('/api/ai/chat', async (req, res) => {
               : 'json')
           : undefined;
         console.log(`[AI-SERVICE] Ollama request: ${messages.length} messages, model: ${ollamaModel}, format: ${ollamaFormat === 'json' ? 'json' : ollamaFormat ? 'schema' : 'none'}`);
-        response = await llmClient.chat(messages, {
+        response = await activeLlmClient.chat(messages, {
           model: ollamaModel,
           ...(ollamaFormat && { format: ollamaFormat })
         });
@@ -557,7 +645,7 @@ app.post('/api/ai/chat', async (req, res) => {
           }
         }
         console.log(`[AI-SERVICE] LM Studio request: ${messages.length} messages, model: ${lmStudioModel}, response_format: ${responseFormat ? 'json_schema' : 'none'}`);
-        response = await llmClient.chat(messages, {
+        response = await activeLlmClient.chat(messages, {
           model: lmStudioModel,
           temperature: temperature !== undefined ? temperature : 0.7,
           max_tokens: effectiveMaxTokens,
@@ -574,6 +662,9 @@ app.post('/api/ai/chat', async (req, res) => {
           max_completion_tokens: _legacyMaxCompletionDropped,
           reasoning: reqReasoning,
           reasoning_effort: reqReasoningEffort,
+          openai_api_key: _dropOpenAiKey,
+          api_key: _dropApiKey,
+          apiKey: _dropApiKeyCamel,
           ...openaiSafeParams
         } = otherParams;
         stripOpenAiWebSearchUnlessAllowed(openaiSafeParams);
@@ -684,15 +775,21 @@ app.post('/api/ai/chat', async (req, res) => {
           console.log(`[AI-SERVICE] GPT-5 model: using max_output_tokens, omitting temperature`);
         }
         if (AI_MODE === 'openai') {
-          response = await llmClient.responses.create(openaiRequest);
+          response = await activeLlmClient.responses.create(openaiRequest);
         } else {
           try {
-            response = await llmClient.responses.create(openaiRequest);
+            response = await activeLlmClient.responses.create(openaiRequest);
           } catch (error) {
             const messages = convertInputToMessages(inputArray);
             const wantsJson = otherParams.text?.format?.type === 'json_object';
-            const { response_schema: _drop2, ...chatSafeParams } = otherParams;
-            const chatResponse = await llmClient.chat.completions.create({
+            const {
+              response_schema: _drop2,
+              openai_api_key: _dropKey2,
+              api_key: _dropKey3,
+              apiKey: _dropKey4,
+              ...chatSafeParams
+            } = otherParams;
+            const chatResponse = await activeLlmClient.chat.completions.create({
               model,
               messages,
               temperature,
@@ -977,9 +1074,12 @@ async function start() {
     console.log(`🚀 AionQA AI Service running on port ${PORT}`);
     console.log(`📡 Backend URL: ${BACKEND_URL}`);
     console.log(`🤖 LLM Mode: ${LLM_DISPLAY_NAME}`);
-    console.log(`🔑 LLM configured: ${!!llmClient}`);
+    console.log(`🔑 Default LLM client: ${llmClient ? 'yes' : 'no (BYOK / per-request key)'}`);
+    console.log(`🔑 Require client OpenAI key: ${REQUIRE_CLIENT_OPENAI_KEY}`);
     if (AI_MODE === "openai") {
-      console.log(`   OpenAI API key: ${llmConfig.apiKey ? "✅ Configured" : "❌ Missing"}`);
+      console.log(
+        `   Shared OpenAI API key: ${llmConfig.apiKey ? "✅ Configured (self-hosted)" : "❌ None (callers must send openai_api_key)"}`
+      );
     } else if (AI_MODE === "openai-compatible") {
       console.log(`   Base URL: ${llmConfig.baseURL || "Not configured"}`);
     } else if (AI_MODE === "lm-studio") {
